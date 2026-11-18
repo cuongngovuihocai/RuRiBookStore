@@ -1,5 +1,3 @@
-import {getSupabaseConfig} from '../server/supabaseStorage';
-
 interface ApiReq {
   method?: string;
 }
@@ -15,9 +13,16 @@ export default function handler(req: ApiReq, res: ApiRes) {
     return;
   }
 
-  const cfg = getSupabaseConfig();
+  const url = (process.env.SUPABASE_URL || '')
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, '')
+    .replace(/\/storage\/v1\/?$/i, '')
+    .replace(/\/+$/, '');
+  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const bucket = (process.env.SUPABASE_BUCKET || 'audiobooks').trim();
+
   res.status(200).json({
-    configured: cfg.configured,
-    bucket: cfg.bucket,
+    configured: Boolean(url && serviceKey),
+    bucket,
   });
 }

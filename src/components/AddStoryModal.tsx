@@ -584,9 +584,17 @@ export function AddStoryModal({
                   <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200">
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
-                      Chưa cấu hình biến môi trường Supabase trên server (<code className="font-mono-tabular">SUPABASE_URL</code>,{' '}
-                      <code className="font-mono-tabular">SUPABASE_SERVICE_ROLE_KEY</code>). Sau khi thêm biến môi trường vào Vercel / Secrets, bạn có thể tải file thẳng lên bucket{' '}
-                      <code className="font-mono-tabular">{supabaseStatus.bucket}</code>. Trong lúc chờ, bạn vẫn có thể chọn tab <strong>1 link</strong> hoặc <strong>Nhiều link</strong>.
+                      {supabaseStatus.apiError ? (
+                        <>
+                          Không kiểm tra được trạng thái Supabase Storage ({supabaseStatus.apiError}). Hãy đảm bảo đã cập nhật bản code mới nhất và Redeploy trên Vercel. Trong lúc chờ, bạn vẫn có thể chọn tab <strong>1 link</strong> hoặc <strong>Nhiều link</strong>.
+                        </>
+                      ) : (
+                        <>
+                          Chưa cấu hình biến môi trường Supabase trên server (<code className="font-mono-tabular">SUPABASE_URL</code>,{' '}
+                          <code className="font-mono-tabular">SUPABASE_SERVICE_ROLE_KEY</code>). Sau khi thêm biến môi trường vào Vercel / Secrets, bạn có thể tải file thẳng lên bucket{' '}
+                          <code className="font-mono-tabular">{supabaseStatus.bucket}</code>. Trong lúc chờ, bạn vẫn có thể chọn tab <strong>1 link</strong> hoặc <strong>Nhiều link</strong>.
+                        </>
+                      )}
                     </span>
                   </div>
                 )}

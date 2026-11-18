@@ -3,17 +3,34 @@ import {auth} from '../firebase';
 export interface SupabaseStorageStatus {
   configured: boolean;
   bucket: string;
+  apiError?: string;
 }
 
 export async function checkSupabaseStorageStatus(): Promise<SupabaseStorageStatus> {
   try {
     const resp = await fetch('/api/storage-status');
     if (!resp.ok) {
-      return {configured: false, bucket: 'audiobooks'};
+      return {
+        configured: false,
+        bucket: 'audiobooks',
+        apiError: `API /api/storage-status trả về lỗi HTTP ${resp.status}.`,
+      };
+    }
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return {
+        configured: false,
+        bucket: 'audiobooks',
+        apiError: 'API /api/storage-status không trả về JSON hợp lệ.',
+      };
     }
     return (await resp.json()) as SupabaseStorageStatus;
   } catch {
-    return {configured: false, bucket: 'audiobooks'};
+    return {
+      configured: false,
+      bucket: 'audiobooks',
+      apiError: 'Không thể kết nối tới API /api/storage-status.',
+    };
   }
 }
 
