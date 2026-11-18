@@ -1,0 +1,6 @@
+{
+  "name": "Tủ Sách Thanh Âm",
+  "description": "Thư viện lưu trữ và nghe truyện audio trực tuyến thân thiện, sắp xếp theo phân loại và từ khoá, hỗ trợ tải file dung lượng lớn và chèn link audio miễn phí.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

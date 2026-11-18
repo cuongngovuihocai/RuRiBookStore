@@ -1,0 +1,146 @@
+{
+  "entities": {
+    "Story": {
+      "title": "Story",
+      "description": "An audio story entry with metadata and external/public audio chapter links.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Title of the audio story."
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Author name."
+        },
+        "narrator": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Voice narrator or channel name."
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Primary story category."
+        },
+        "keywords": {
+          "type": "array",
+          "description": "Bounded list of up to 20 searchable keywords."
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2500,
+          "description": "Short synopsis or listening notes."
+        },
+        "coverUrl": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Cover artwork URL."
+        },
+        "chapters": {
+          "type": "array",
+          "description": "Ordered list of chapters with playable audio URLs."
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the story is visible on the public listener catalog."
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Admin UID who created the story."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "title",
+        "author",
+        "narrator",
+        "category",
+        "keywords",
+        "description",
+        "coverUrl",
+        "chapters",
+        "isPublished",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "A story classification label managed by admin.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name of the category."
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether visible to public listeners."
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Admin UID who created the category."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["name", "isPublic", "createdBy", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Admin allowlist entry keyed by UID.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "maxLength": 20,
+          "description": "Admin role flag."
+        }
+      },
+      "required": ["role"]
+    }
+  },
+  "firestore": {
+    "/stories/{storyId}": {
+      "schema": {
+        "$ref": "#/entities/Story"
+      },
+      "description": "Publicly readable published audio story catalog; writable only by verified admin."
+    },
+    "/categories/{categoryId}": {
+      "schema": {
+        "$ref": "#/entities/Category"
+      },
+      "description": "Publicly readable story categories; writable only by verified admin."
+    },
+    "/admins/{adminId}": {
+      "schema": {
+        "$ref": "#/entities/AdminUser"
+      },
+      "description": "Read-only self/admin lookup table for role verification."
+    }
+  }
+}

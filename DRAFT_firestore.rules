@@ -1,0 +1,145 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email == 'cuongngovuihocai@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+        (isSignedIn() &&
+          request.auth.token.email_verified == true &&
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // --- Entity Validation Blueprints ---
+    function isValidStory(data) {
+      return data.keys().hasAll([
+        'title',
+        'author',
+        'narrator',
+        'category',
+        'keywords',
+        'description',
+        'coverUrl',
+        'chapters',
+        'isPublished',
+        'createdBy',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title',
+        'author',
+        'narrator',
+        'category',
+        'keywords',
+        'description',
+        'coverUrl',
+        'chapters',
+        'isPublished',
+        'createdBy',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+      data.author is string && data.author.size() <= 150 &&
+      data.narrator is string && data.narrator.size() <= 150 &&
+      data.category is string && data.category.size() >= 1 && data.category.size() <= 80 &&
+      data.description is string && data.description.size() <= 2500 &&
+      data.coverUrl is string && data.coverUrl.size() <= 1000 &&
+      data.isPublished is bool &&
+      data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
+      data.createdBy == request.auth.uid &&
+      data.keywords is list && data.keywords.size() <= 20 &&
+      (data.keywords.size() == 0 || (data.keywords[0] is string && data.keywords[0].size() <= 50)) &&
+      data.chapters is list && data.chapters.size() >= 1 && data.chapters.size() <= 200 &&
+      data.chapters[0] is map &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'isPublic', 'createdBy', 'createdAt']) &&
+      data.keys().hasOnly(['name', 'isPublic', 'createdBy', 'createdAt']) &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+      data.isPublic is bool &&
+      data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
+      data.createdBy == request.auth.uid &&
+      data.createdAt is timestamp;
+    }
+
+    // --- Collections ---
+    match /stories/{storyId} {
+      allow get: if isValidId(storyId) && (existing().isPublished == true || isAdmin());
+      allow list: if existing().isPublished == true || isBootstrappedAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(storyId) &&
+        isValidStory(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isSignedIn() &&
+        isValidId(storyId) &&
+        isValidStory(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'author',
+          'narrator',
+          'category',
+          'keywords',
+          'description',
+          'coverUrl',
+          'chapters',
+          'isPublished',
+          'updatedAt'
+        ]) &&
+        isAdmin();
+      allow delete: if isSignedIn() && isValidId(storyId) && isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId) && (existing().isPublic == true || isAdmin());
+      allow list: if existing().isPublic == true;
+      allow create: if isSignedIn() &&
+        isValidId(categoryId) &&
+        isValidCategory(incoming()) &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(categoryId) && isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+  }
+}
