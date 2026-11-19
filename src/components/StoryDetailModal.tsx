@@ -15,9 +15,12 @@ import {
 import {useState} from 'react';
 import type {AudioChapter, AudioStory, CategoryDoc, ListenerStoryState} from '../types';
 import {
+  diagnoseGoogleDriveFile,
+  extractGoogleDriveFileId,
   formatDuration,
   getAudioDurationFromUrl,
   normalizeExternalAudioUrl,
+  resolvePlayableAudioUrl,
 } from '../utils/format';
 
 interface StoryDetailModalProps {
@@ -68,6 +71,9 @@ export function StoryDetailModal({
   const [isAddingLink, setIsAddingLink] = useState(false);
   const [newChTitle, setNewChTitle] = useState('');
   const [newChUrl, setNewChUrl] = useState('');
+  const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
+  const [editChTitle, setEditChTitle] = useState('');
+  const [editChUrl, setEditChUrl] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
@@ -114,18 +120,31 @@ export function StoryDetailModal({
     e.preventDefault();
     const trimmed = newChUrl.trim();
     if (!trimmed) return;
+    const driveId = extractGoogleDriveFileId(trimmed);
+    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/samples/') && !driveId) {
+      setStatusError('Vui lòng nhập link hợp lệ (https://...) hoặc File ID Google Drive sau /d/.');
+      return;
+    }
     setIsBusy(true);
     setStatusError(null);
     try {
       const norm = normalizeExternalAudioUrl(trimmed);
-      const check = await getAudioDurationFromUrl(norm.playableUrl);
+      const streamUrl = resolvePlayableAudioUrl(norm.playableUrl);
+      const check = await getAudioDurationFromUrl(streamUrl);
+
+      if (norm.isGoogleDrive && !check.ok && norm.driveFileId) {
+        const hint = await diagnoseGoogleDriveFile(norm.driveFileId);
+        if (hint) {
+          setStatusError(hint);
+        }
+      }
 
       const newChapter: AudioChapter = {
         id: `ch-${crypto.randomUUID()}`,
         title: newChTitle.trim() || `Chương ${story.chapters.length + 1}`,
-        sourceType: 'url',
+        sourceType: trimmed.startsWith('/samples/') ? 'sample' : 'url',
         audioUrl: norm.playableUrl,
-        originalUrl: trimmed,
+        originalUrl: norm.originalUrl || trimmed,
         durationSec: check.durationSec,
       };
 
@@ -150,6 +169,69 @@ export function StoryDetailModal({
     await onUpdateStory(story.id, {
       chapters: story.chapters.filter((c) => c.id !== chapterId),
     });
+  };
+
+  const startEditChapter = (ch: AudioChapter) => {
+    setEditingChapterId(ch.id);
+    setEditChTitle(ch.title);
+    setEditChUrl(ch.originalUrl || ch.audioUrl);
+    setStatusError(null);
+  };
+
+  const handleSaveEditChapter = async (e: React.FormEvent, originalChapter: AudioChapter) => {
+    e.preventDefault();
+    const trimmed = editChUrl.trim();
+    const driveId = extractGoogleDriveFileId(trimmed);
+    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/samples/') && !driveId) {
+      setStatusError('Vui lòng nhập link hợp lệ (https://...) hoặc File ID Google Drive sau /d/.');
+      return;
+    }
+
+    setIsBusy(true);
+    setStatusError(null);
+    try {
+      const norm = normalizeExternalAudioUrl(trimmed);
+      const isSameSource =
+        norm.playableUrl === originalChapter.audioUrl ||
+        trimmed === (originalChapter.originalUrl || originalChapter.audioUrl);
+
+      let durationSec = originalChapter.durationSec;
+      if (!isSameSource || durationSec <= 0) {
+        const streamUrl = resolvePlayableAudioUrl(norm.playableUrl);
+        const check = await getAudioDurationFromUrl(streamUrl);
+        if (check.durationSec > 0) {
+          durationSec = check.durationSec;
+        } else if (!isSameSource) {
+          durationSec = 0;
+        }
+        if (norm.isGoogleDrive && !check.ok && norm.driveFileId) {
+          const hint = await diagnoseGoogleDriveFile(norm.driveFileId);
+          if (hint) {
+            setStatusError(hint);
+          }
+        }
+      }
+
+      const updatedChapters = story.chapters.map((c) =>
+        c.id === originalChapter.id
+          ? {
+              ...c,
+              title: editChTitle.trim() || c.title,
+              sourceType: trimmed.startsWith('/samples/') ? ('sample' as const) : ('url' as const),
+              audioUrl: norm.playableUrl,
+              originalUrl: norm.originalUrl || trimmed,
+              durationSec,
+            }
+          : c
+      );
+
+      await onUpdateStory(story.id, {chapters: updatedChapters});
+      setEditingChapterId(null);
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : 'Không thể cập nhật link chương.');
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
@@ -435,11 +517,11 @@ export function StoryDetailModal({
                   className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-40 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
                 />
                 <input
-                  type="url"
+                  type="text"
                   required
                   value={newChUrl}
                   onChange={(e) => setNewChUrl(e.target.value)}
-                  placeholder="Link R2 / Archive.org / MP3..."
+                  placeholder="Link audio hoặc ID Google Drive sau /d/..."
                   className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
                 />
                 <button
@@ -460,6 +542,59 @@ export function StoryDetailModal({
             <div className="divide-y divide-[#ECDCB4] rounded-xl border border-[#DEC999] bg-[#FFFDF6]/70 dark:divide-[#2E294D] dark:border-[#302B4F] dark:bg-[#19162D]/60">
               {story.chapters.map((ch, idx) => {
                 const isActiveChapter = currentStoryId === story.id && currentChapterIndex === idx;
+                const isEditingThis = canManage && editingChapterId === ch.id;
+
+                if (isEditingThis) {
+                  return (
+                    <form
+                      key={ch.id}
+                      onSubmit={(e) => handleSaveEditChapter(e, ch)}
+                      className="space-y-2 bg-[#F7ECCE]/60 px-4 py-3 dark:bg-[#231F3D]/80"
+                    >
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <input
+                          type="text"
+                          required
+                          value={editChTitle}
+                          onChange={(e) => setEditChTitle(e.target.value)}
+                          placeholder="Tên chương..."
+                          className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-48 dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
+                        />
+                        <input
+                          type="text"
+                          required
+                          value={editChUrl}
+                          onChange={(e) => setEditChUrl(e.target.value)}
+                          placeholder="Link audio hoặc ID Google Drive sau /d/..."
+                          className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
+                        />
+                      </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => setEditingChapterId(null)}
+                          className="rounded-lg border border-[#D3BC87] px-2.5 py-1 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:border-[#37315A] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
+                        >
+                          Huỷ
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isBusy}
+                          className="inline-flex items-center gap-1 rounded-lg bg-[#7A4B0C] px-3 py-1 text-xs font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                        >
+                          {isBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Check className="h-3.5 w-3.5" />
+                          )}
+                          <span>Lưu chương</span>
+                        </button>
+                      </div>
+                    </form>
+                  );
+                }
+
                 return (
                   <div
                     key={ch.id}
@@ -497,15 +632,29 @@ export function StoryDetailModal({
                       </div>
                     </button>
 
-                    {canManage && story.chapters.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveChapter(ch.id)}
-                        className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#292447]"
-                        title="Xoá chương"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                    {canManage && (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => startEditChapter(ch)}
+                          className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-[#7A4B0C] dark:text-[#9E94C0] dark:hover:bg-[#292447] dark:hover:text-[#D5B263]"
+                          title="Chỉnh sửa tên & link chương"
+                          aria-label="Chỉnh sửa chương"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                        </button>
+                        {story.chapters.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveChapter(ch.id)}
+                            className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#292447]"
+                            title="Xoá chương"
+                            aria-label="Xoá chương"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 );

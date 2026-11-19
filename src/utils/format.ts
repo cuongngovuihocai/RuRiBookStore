@@ -1,3 +1,5 @@
+import firebaseConfig from '../../firebase-applet-config.json';
+
 export interface CuratedCover {
   id: string;
   label: string;
@@ -60,11 +62,104 @@ export function formatTotalDurationVi(seconds: number): string {
   return `${hrs} giờ ${mins} phút`;
 }
 
+export function getGoogleDriveApiKey(): string {
+  const envKey = (import.meta.env.VITE_GOOGLE_DRIVE_API_KEY || '').trim();
+  if (envKey) return envKey;
+  return (firebaseConfig.apiKey || '').trim();
+}
+
+/**
+ * Extracts a Google Drive File ID from full Drive URLs, gdrive:// URIs,
+ * or a raw Drive File ID pasted directly (text after /d/).
+ */
+export function extractGoogleDriveFileId(rawInput: string): string | null {
+  const trimmed = rawInput.trim();
+  if (!trimmed) return null;
+
+  const patterns = [
+    /^gdrive:\/\/([a-zA-Z0-9_-]{10,})$/i,
+    /drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/i,
+    /drive\.google\.com\/open\?(?:[^#]*&)?id=([a-zA-Z0-9_-]+)/i,
+    /drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]+)/i,
+    /drive\.usercontent\.google\.com\/download\?(?:[^#]*&)?id=([a-zA-Z0-9_-]+)/i,
+    /docs\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]+)/i,
+    /lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/i,
+    /googleapis\.com\/drive\/v3\/files\/([a-zA-Z0-9_-]+)/i,
+  ];
+
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m?.[1]) return m[1];
+  }
+
+  // Raw Drive File ID pasted directly (e.g. text after /d/)
+  if (/^[a-zA-Z0-9_-]{20,100}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+export function buildGoogleDriveStreamUrl(fileId: string): string {
+  const apiKey = getGoogleDriveApiKey();
+  if (apiKey) {
+    return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+      fileId
+    )}?alt=media&key=${encodeURIComponent(apiKey)}`;
+  }
+  return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+}
+
+/**
+ * Resolves stored chapter audioUrl into an actually streamable URL at playback time.
+ * Converts gdrive://<id> or legacy Google Drive uc?export=download links to Drive API v3 alt=media.
+ */
+export function resolvePlayableAudioUrl(storedUrl: string): string {
+  const trimmed = (storedUrl || '').trim();
+  if (!trimmed) return '';
+  const driveId = extractGoogleDriveFileId(trimmed);
+  if (driveId) {
+    return buildGoogleDriveStreamUrl(driveId);
+  }
+  return trimmed;
+}
+
+export async function diagnoseGoogleDriveFile(fileId: string): Promise<string | null> {
+  const apiKey = getGoogleDriveApiKey();
+  if (!apiKey) {
+    return 'Thiếu Google API Key để phát file Google Drive qua Drive API.';
+  }
+  try {
+    const resp = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+        fileId
+      )}?fields=id,name,mimeType&key=${encodeURIComponent(apiKey)}`
+    );
+    if (resp.ok) {
+      return null;
+    }
+    const errText = await resp.text();
+    if (resp.status === 403 && /Drive API has not been used|accessNotConfigured/i.test(errText)) {
+      return 'Project Google Cloud (audiobook-17868) chưa bật "Google Drive API". Hãy bật Google Drive API trong Google Cloud Console rồi thử lại.';
+    }
+    if (resp.status === 403) {
+      return 'API Key bị giới hạn quyền hoặc Google Drive tạm giới hạn lượt tải cho file này.';
+    }
+    if (resp.status === 404) {
+      return 'Không tìm thấy file hoặc file Drive chưa bật "Bất kỳ ai có đường liên kết (Người xem)".';
+    }
+    return `Google Drive API trả về lỗi HTTP ${resp.status}.`;
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeExternalAudioUrl(rawInput: string): {
   playableUrl: string;
   originalUrl: string;
   providerLabel: string;
   isGoogleDrive: boolean;
+  driveFileId?: string;
 } {
   const trimmed = rawInput.trim();
   if (!trimmed) {
@@ -108,19 +203,17 @@ export function normalizeExternalAudioUrl(rawInput: string): {
     };
   }
 
-  // Google Drive: convert share link to export=download URL
-  const gdriveMatch =
-    trimmed.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/) ||
-    trimmed.match(/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/) ||
-    trimmed.match(/drive\.google\.com\/uc\?.*id=([a-zA-Z0-9_-]+)/);
-
-  if (gdriveMatch && gdriveMatch[1]) {
-    const directGDrive = `https://drive.google.com/uc?export=download&id=${gdriveMatch[1]}`;
+  // Google Drive (full URL or raw File ID after /d/)
+  const driveId = extractGoogleDriveFileId(trimmed);
+  if (driveId) {
     return {
-      playableUrl: directGDrive,
-      originalUrl: trimmed,
-      providerLabel: 'Google Drive',
+      playableUrl: `gdrive://${driveId}`,
+      originalUrl: /^https?:\/\//i.test(trimmed)
+        ? trimmed
+        : `https://drive.google.com/file/d/${driveId}/view`,
+      providerLabel: 'Google Drive (API Stream)',
       isGoogleDrive: true,
+      driveFileId: driveId,
     };
   }
 
@@ -133,6 +226,7 @@ export function normalizeExternalAudioUrl(rawInput: string): {
 }
 
 export function getAudioDurationFromUrl(url: string): Promise<{ok: boolean; durationSec: number}> {
+  const resolved = resolvePlayableAudioUrl(url);
   return new Promise((resolve) => {
     const audio = new Audio();
     audio.preload = 'metadata';
@@ -156,6 +250,6 @@ export function getAudioDurationFromUrl(url: string): Promise<{ok: boolean; dura
       cleanup();
       resolve({ok: false, durationSec: 0});
     };
-    audio.src = url;
+    audio.src = resolved;
   });
 }

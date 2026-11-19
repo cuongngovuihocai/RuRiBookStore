@@ -1,7 +1,9 @@
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
   CloudUpload,
+  Edit3,
   HelpCircle,
   Link2,
   Loader2,
@@ -15,9 +17,12 @@ import {createCategoryDoc, createStoryDoc} from '../firebase';
 import type {AudioChapter, CategoryDoc} from '../types';
 import {
   CURATED_COVERS,
+  diagnoseGoogleDriveFile,
+  extractGoogleDriveFileId,
   formatDuration,
   getAudioDurationFromUrl,
   normalizeExternalAudioUrl,
+  resolvePlayableAudioUrl,
 } from '../utils/format';
 import type {RuRiTTSImportedDraft, RuRiTTSPendingFile} from '../utils/ruriTtsBridge';
 import {
@@ -82,6 +87,9 @@ export function AddStoryModal({
   const [pendingFiles, setPendingFiles] = useState<QueuedAudioFile[]>([]);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
+  const [editChapterUrl, setEditChapterUrl] = useState('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -188,6 +196,8 @@ export function AddStoryModal({
     setIsPublished(true);
     setChapters([]);
     setPendingFiles([]);
+    setEditingChapterId(null);
+    setEditChapterUrl('');
     setLinkUrlInput('');
     setLinkTitleInput('');
     setBatchLinksInput('');
@@ -301,8 +311,11 @@ export function AddStoryModal({
 
   const handleVerifyAndAddLink = async () => {
     const trimmed = linkUrlInput.trim();
-    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/samples/')) {
-      setErrorMsg('Vui lòng nhập đường dẫn hợp lệ bắt đầu bằng https:// hoặc http://');
+    const driveId = extractGoogleDriveFileId(trimmed);
+    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/samples/') && !driveId) {
+      setErrorMsg(
+        'Vui lòng nhập đường dẫn hợp lệ (https://...) hoặc dán trực tiếp File ID Google Drive sau /d/.'
+      );
       return;
     }
 
@@ -312,14 +325,15 @@ export function AddStoryModal({
 
     try {
       const normalized = normalizeExternalAudioUrl(trimmed);
-      const check = await getAudioDurationFromUrl(normalized.playableUrl);
+      const streamUrl = resolvePlayableAudioUrl(normalized.playableUrl);
+      const check = await getAudioDurationFromUrl(streamUrl);
 
       const newChapter: AudioChapter = {
         id: `ch-${crypto.randomUUID()}`,
         title: linkTitleInput.trim() || `Chương ${chapters.length + 1}`,
         sourceType: trimmed.startsWith('/samples/') ? 'sample' : 'url',
         audioUrl: normalized.playableUrl,
-        originalUrl: trimmed,
+        originalUrl: normalized.originalUrl || trimmed,
         durationSec: check.durationSec,
       };
 
@@ -331,10 +345,14 @@ export function AddStoryModal({
       setLinkTitleInput('');
 
       if (normalized.isGoogleDrive && !check.ok) {
+        const hint = normalized.driveFileId
+          ? await diagnoseGoogleDriveFile(normalized.driveFileId)
+          : null;
         setLinkStatus({
           ok: true,
           message:
-            'Đã thêm link Google Drive. Lưu ý: trên hosting tĩnh (Vercel/GitHub Pages), Google Drive có thể bị trình duyệt chặn CORS — khuyên dùng Supabase Storage hoặc Archive.org để phát ổn định nhất.',
+            hint ||
+            'Đã thêm link Google Drive (chưa đo được sẵn thời lượng — hãy kiểm tra bật Google Drive API và quyền chia sẻ Công khai).',
         });
       } else {
         setLinkStatus({
@@ -353,10 +371,12 @@ export function AddStoryModal({
     const lines = batchLinksInput
       .split('\n')
       .map((l) => l.trim())
-      .filter((l) => /^https?:\/\//i.test(l));
+      .filter((l) => /^https?:\/\//i.test(l) || Boolean(extractGoogleDriveFileId(l)));
 
     if (lines.length === 0) {
-      setErrorMsg('Vui lòng nhập ít nhất 1 đường dẫn bắt đầu bằng http:// hoặc https://');
+      setErrorMsg(
+        'Vui lòng nhập ít nhất 1 link bắt đầu bằng http://, https:// hoặc ID Google Drive sau /d/.'
+      );
       return;
     }
 
@@ -367,7 +387,7 @@ export function AddStoryModal({
         title: `Chương ${chapters.length + idx + 1}`,
         sourceType: 'url',
         audioUrl: norm.playableUrl,
-        originalUrl: line,
+        originalUrl: norm.originalUrl || line,
         durationSec: 0,
       };
     });
@@ -376,6 +396,33 @@ export function AddStoryModal({
     setBatchLinksInput('');
     setErrorMsg(null);
     setLinkStatus({ok: true, message: `Đã thêm ${added.length} chương từ danh sách link.`});
+  };
+
+  const handleSaveStagedChapterUrl = async (chapterId: string) => {
+    const trimmed = editChapterUrl.trim();
+    const driveId = extractGoogleDriveFileId(trimmed);
+    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/samples/') && !driveId) {
+      setErrorMsg('Vui lòng nhập link hợp lệ (https://...) hoặc File ID Google Drive sau /d/.');
+      return;
+    }
+    const norm = normalizeExternalAudioUrl(trimmed);
+    const streamUrl = resolvePlayableAudioUrl(norm.playableUrl);
+    const check = await getAudioDurationFromUrl(streamUrl);
+    setChapters((prev) =>
+      prev.map((item) =>
+        item.id === chapterId
+          ? {
+              ...item,
+              sourceType: trimmed.startsWith('/samples/') ? 'sample' : 'url',
+              audioUrl: norm.playableUrl,
+              originalUrl: norm.originalUrl || trimmed,
+              durationSec: check.durationSec > 0 ? check.durationSec : item.durationSec,
+            }
+          : item
+      )
+    );
+    setEditingChapterId(null);
+    setErrorMsg(null);
   };
 
   const handleAppendKeyword = (kw: string) => {
@@ -568,10 +615,10 @@ export function AddStoryModal({
                     <strong>Dropbox:</strong> Dán link chia sẻ thông thường, hệ thống tự chuyển sang link stream trực tiếp.
                   </li>
                   <li>
-                    <strong>Google Drive:</strong> Tải file lên Drive → bấm <strong>Chia sẻ</strong> → đổi Quyền truy cập chung thành{' '}
-                    <strong>Bất kỳ ai có đường liên kết (Người xem)</strong> → sao chép link (<code className="font-mono-tabular">drive.google.com/file/d/.../view</code>) và dán thẳng vào ô trên, hệ thống tự chuyển đổi định dạng.{' '}
+                    <strong>Google Drive (qua Drive API `alt=media`):</strong> Tải file lên Drive → bấm <strong>Chia sẻ</strong> → đổi thành{' '}
+                    <strong>Bất kỳ ai có đường liên kết (Người xem)</strong> → dán <strong>nguyên link chia sẻ</strong> hoặc <strong>chỉ dán đoạn ID sau <code className="font-mono-tabular">/d/</code></strong> (vd: <code className="font-mono-tabular">1ABCxyz...</code>) vào ô <strong>1 link</strong> hoặc <strong>Nhiều link</strong>.{' '}
                     <span className="text-[#7A4B0C] dark:text-[#D5B263]">
-                      Lưu ý: File lớn (&gt;100MB) hoặc nhiều người nghe cùng lúc có thể bị Google giới hạn lượt tải / chặn CORS không tua được; nếu bị lỗi phát, hãy ưu tiên Supabase Storage hoặc Archive.org.
+                      Điều kiện: Bật <strong>Google Drive API</strong> trong Google Cloud Console của project <code className="font-mono-tabular">audiobook-17868</code> để phát trực tiếp ổn định qua trình phát của app.
                     </span>
                   </li>
                 </ul>
@@ -731,16 +778,16 @@ export function AddStoryModal({
                     className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
                   />
                   <input
-                    type="url"
+                    type="text"
                     value={linkUrlInput}
                     onChange={(e) => setLinkUrlInput(e.target.value)}
-                    placeholder="https://xxx.supabase.co/storage/v1/object/public/... hoặc archive.org/..."
+                    placeholder="Dán link audio hoặc chỉ cần ID Google Drive sau /d/"
                     className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none sm:col-span-2 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
                   />
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-[11px] text-[#6D5937] dark:text-[#9E94C0]">
-                    Hỗ trợ MP3, M4A, WAV, OGG, FLAC, OPUS. Tự động đo thời lượng khi kiểm tra.
+                    Hỗ trợ MP3, M4A, WAV, OGG, hoặc ID Google Drive (sau /d/). Tự động đo thời lượng khi kiểm tra.
                   </p>
                   <button
                     type="button"
@@ -765,7 +812,7 @@ export function AddStoryModal({
                   rows={4}
                   value={batchLinksInput}
                   onChange={(e) => setBatchLinksInput(e.target.value)}
-                  placeholder={`https://xxx.supabase.co/storage/v1/object/public/audiobooks/tap-1.mp3\nhttps://archive.org/download/.../tap-2.mp3`}
+                  placeholder={`https://xxx.supabase.co/storage/v1/object/public/audiobook/tap-1.mp3\n1ABCxyzDriveFileIdSauDauGachCheoD\nhttps://archive.org/download/.../tap-2.mp3`}
                   className="w-full rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
                 />
                 <div className="flex justify-end">
@@ -799,39 +846,77 @@ export function AddStoryModal({
               <p className="text-xs font-semibold text-[#4B3B21] dark:text-[#DCD6F0]">
                 Danh sách chương ({chapters.length})
               </p>
-              <div className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
+              <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
                 {chapters.map((ch, idx) => (
                   <div
                     key={ch.id}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-[#DEC999] bg-[#FFFDF6] px-3 py-2 dark:border-[#322C52] dark:bg-[#231F3D]"
+                    className="space-y-2 rounded-lg border border-[#DEC999] bg-[#FFFDF6] px-3 py-2 dark:border-[#322C52] dark:bg-[#231F3D]"
                   >
-                    <span className="font-mono-tabular text-xs text-[#856F4B] dark:text-[#9E94C0]">
-                      {String(idx + 1).padStart(2, '0')}
-                    </span>
-                    <input
-                      type="text"
-                      value={ch.title}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setChapters((prev) =>
-                          prev.map((item) => (item.id === ch.id ? {...item, title: val} : item))
-                        );
-                      }}
-                      className="min-w-0 flex-1 bg-transparent text-xs font-medium text-[#2B2111] focus:outline-none dark:text-[#F1ECF8]"
-                    />
-                    {ch.durationSec > 0 && (
-                      <span className="font-mono-tabular text-[11px] text-[#6D5937] whitespace-nowrap dark:text-[#ACA4CA]">
-                        {formatDuration(ch.durationSec)}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono-tabular text-xs text-[#856F4B] dark:text-[#9E94C0]">
+                        {String(idx + 1).padStart(2, '0')}
                       </span>
+                      <input
+                        type="text"
+                        value={ch.title}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setChapters((prev) =>
+                            prev.map((item) => (item.id === ch.id ? {...item, title: val} : item))
+                          );
+                        }}
+                        className="min-w-0 flex-1 bg-transparent text-xs font-medium text-[#2B2111] focus:outline-none dark:text-[#F1ECF8]"
+                      />
+                      {ch.durationSec > 0 && (
+                        <span className="font-mono-tabular text-[11px] text-[#6D5937] whitespace-nowrap dark:text-[#ACA4CA]">
+                          {formatDuration(ch.durationSec)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (editingChapterId === ch.id) {
+                            setEditingChapterId(null);
+                          } else {
+                            setEditingChapterId(ch.id);
+                            setEditChapterUrl(ch.originalUrl || ch.audioUrl);
+                          }
+                        }}
+                        className="rounded p-1 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-[#7A4B0C] dark:text-[#9E94C0] dark:hover:bg-[#2D284D] dark:hover:text-[#D5B263]"
+                        title="Sửa link audio chương này"
+                        aria-label="Sửa link chương"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChapters((prev) => prev.filter((item) => item.id !== ch.id))}
+                        className="rounded p-1 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#2D284D]"
+                        aria-label="Xoá chương"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {editingChapterId === ch.id && (
+                      <div className="flex items-center gap-2 border-t border-[#DEC999]/70 pt-2 dark:border-[#322C52]">
+                        <input
+                          type="text"
+                          value={editChapterUrl}
+                          onChange={(e) => setEditChapterUrl(e.target.value)}
+                          placeholder="Link audio hoặc ID Google Drive sau /d/..."
+                          className="min-w-0 flex-1 rounded-md border border-[#D3BC87] bg-[#FDF8EB] px-2.5 py-1 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveStagedChapterUrl(ch.id)}
+                          className="inline-flex items-center gap-1 rounded-md bg-[#7A4B0C] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8]"
+                        >
+                          <Check className="h-3 w-3" />
+                          <span>Lưu</span>
+                        </button>
+                      </div>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setChapters((prev) => prev.filter((item) => item.id !== ch.id))}
-                      className="rounded p-1 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#2D284D]"
-                      aria-label="Xoá chương"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
                   </div>
                 ))}
               </div>

@@ -15,7 +15,12 @@ import {
 } from 'lucide-react';
 import {useEffect, useRef, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
-import {formatDuration} from '../utils/format';
+import {
+  diagnoseGoogleDriveFile,
+  extractGoogleDriveFileId,
+  formatDuration,
+  resolvePlayableAudioUrl,
+} from '../utils/format';
 
 interface AudioPlayerBarProps {
   story: AudioStory | null;
@@ -66,7 +71,7 @@ export function AudioPlayerBar({
   const resumeAppliedRef = useRef<string>('');
 
   const chapter = story?.chapters[chapterIndex] || story?.chapters[0];
-  const activeSrc = chapter?.audioUrl || '';
+  const activeSrc = chapter?.audioUrl ? resolvePlayableAudioUrl(chapter.audioUrl) : '';
 
   useEffect(() => {
     const el = audioRef.current;
@@ -182,6 +187,15 @@ export function AudioPlayerBar({
     setIsBuffering(false);
     setAudioError('Không thể phát nguồn audio này. Kiểm tra lại đường dẫn hoặc quyền truy cập file.');
     onPlayingChange(false);
+
+    const driveId = chapter?.audioUrl ? extractGoogleDriveFileId(chapter.audioUrl) : null;
+    if (driveId) {
+      diagnoseGoogleDriveFile(driveId).then((hint) => {
+        if (hint) {
+          setAudioError(hint);
+        }
+      });
+    }
   };
 
   const seekTo = (sec: number) => {
