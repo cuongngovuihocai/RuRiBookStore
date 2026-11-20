@@ -1,7 +1,8 @@
 import {BookOpen, Heart, Pause, Play} from 'lucide-react';
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
 import {formatDuration} from '../utils/format';
+import {CoverImage} from './CoverImage';
 
 interface StoryListRowProps {
   story: AudioStory;
@@ -27,6 +28,10 @@ export function StoryListRow({
   onSelectKeyword,
 }: StoryListRowProps) {
   const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [story.coverUrl]);
   const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
 
   return (
@@ -40,10 +45,10 @@ export function StoryListRow({
       <div className="flex min-w-0 items-center gap-3.5">
         <div className="relative h-16 w-12 shrink-0 overflow-hidden rounded-lg bg-[#EADAB2] dark:bg-[#262240]">
           {!imgError && story.coverUrl ? (
-            <img
+            <CoverImage
               src={story.coverUrl}
               alt={`Bìa ${story.title}`}
-              referrerPolicy="no-referrer"
+              targetWidth={160}
               onError={() => setImgError(true)}
               className="h-full w-full object-cover"
             />

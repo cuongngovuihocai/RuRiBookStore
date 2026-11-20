@@ -1,6 +1,7 @@
 import {
   ChevronUp,
   Clock,
+  ExternalLink,
   ListMusic,
   Loader2,
   Pause,
@@ -16,11 +17,13 @@ import {
 import {useEffect, useRef, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
 import {
+  buildGoogleDrivePreviewUrl,
   diagnoseGoogleDriveFile,
   extractGoogleDriveFileId,
   formatDuration,
   resolvePlayableAudioUrl,
 } from '../utils/format';
+import {CoverImage} from './CoverImage';
 
 interface AudioPlayerBarProps {
   story: AudioStory | null;
@@ -61,6 +64,7 @@ export function AudioPlayerBar({
   const [isMuted, setIsMuted] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [drivePreviewId, setDrivePreviewId] = useState<string | null>(null);
 
   const [showChapters, setShowChapters] = useState(false);
   const [showTimerMenu, setShowTimerMenu] = useState(false);
@@ -89,6 +93,7 @@ export function AudioPlayerBar({
 
   useEffect(() => {
     setAudioError(null);
+    setDrivePreviewId(null);
     setCurrentTime(0);
     setDuration(chapter?.durationSec || 0);
   }, [story?.id, chapter?.id]);
@@ -185,17 +190,21 @@ export function AudioPlayerBar({
 
   const handleAudioError = () => {
     setIsBuffering(false);
-    setAudioError('Không thể phát nguồn audio này. Kiểm tra lại đường dẫn hoặc quyền truy cập file.');
     onPlayingChange(false);
 
     const driveId = chapter?.audioUrl ? extractGoogleDriveFileId(chapter.audioUrl) : null;
     if (driveId) {
+      setDrivePreviewId(driveId);
+      setAudioError(null);
       diagnoseGoogleDriveFile(driveId).then((hint) => {
-        if (hint) {
+        if (hint && hint.includes('Không tìm thấy file')) {
           setAudioError(hint);
         }
       });
+      return;
     }
+
+    setAudioError('Không thể phát nguồn audio này. Kiểm tra lại đường dẫn hoặc quyền truy cập file.');
   };
 
   const seekTo = (sec: number) => {
@@ -307,6 +316,43 @@ export function AudioPlayerBar({
         </div>
       )}
 
+      {drivePreviewId && (
+        <div className="mx-auto max-w-[1440px] border-b border-[#DEC999] bg-[#FDF8EB] px-3 py-2.5 sm:px-6 dark:border-[#302B4F] dark:bg-[#1E1B33]">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-medium text-[#7A4B0C] dark:text-[#D5B263]">
+              Trình phát nhúng Google Drive — {chapter.title} (Bấm nút Play bên trong khung để nghe/xem)
+            </span>
+            <div className="flex items-center gap-2">
+              <a
+                href={buildGoogleDrivePreviewUrl(drivePreviewId)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-md border border-[#D3BC87] bg-[#FFFDF6] px-2 py-1 text-[11px] font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#DCD6F0]"
+              >
+                <ExternalLink className="h-3 w-3" />
+                <span>Mở tab mới</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setDrivePreviewId(null)}
+                className="rounded p-1 text-[#6D5937] hover:bg-[#EFE0BA] dark:text-[#ACA4CA] dark:hover:bg-[#292447]"
+                aria-label="Đóng khung Google Drive"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+          <div className="overflow-hidden rounded-xl border border-[#DEC999] bg-black/5 dark:border-[#322C52]">
+            <iframe
+              src={buildGoogleDrivePreviewUrl(drivePreviewId)}
+              title={`Google Drive - ${chapter.title}`}
+              className="h-24 w-full border-0 sm:h-28"
+              allow="autoplay"
+            />
+          </div>
+        </div>
+      )}
+
       {audioError && (
         <div className="border-b border-rose-300 bg-rose-50 px-4 py-1 text-center text-xs text-rose-800 dark:border-rose-900/40 dark:bg-rose-950/50 dark:text-rose-200">
           {audioError}
@@ -327,10 +373,10 @@ export function AudioPlayerBar({
             onClick={() => onOpenStoryDetail(story)}
             className="h-11 w-9 shrink-0 overflow-hidden rounded-md border border-[#DFCCA0] bg-[#EADAB2] dark:border-[#37315A] dark:bg-[#262240]"
           >
-            <img
+            <CoverImage
               src={story.coverUrl}
               alt={story.title}
-              referrerPolicy="no-referrer"
+              targetWidth={140}
               className="h-full w-full object-cover"
             />
           </button>

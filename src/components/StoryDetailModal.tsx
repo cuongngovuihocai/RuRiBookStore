@@ -10,18 +10,23 @@ import {
   Play,
   Plus,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import type {AudioChapter, AudioStory, CategoryDoc, ListenerStoryState} from '../types';
 import {
   diagnoseGoogleDriveFile,
   extractGoogleDriveFileId,
   formatDuration,
   getAudioDurationFromUrl,
+  normalizeCoverImageUrl,
   normalizeExternalAudioUrl,
+  optimizeCoverImageFile,
   resolvePlayableAudioUrl,
 } from '../utils/format';
+import {checkSupabaseStorageStatus, uploadCoverToSupabase} from '../utils/supabaseUpload';
+import {CoverImage} from './CoverImage';
 
 interface StoryDetailModalProps {
   story: AudioStory | null;
@@ -76,6 +81,20 @@ export function StoryDetailModal({
   const [editChUrl, setEditChUrl] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [supabaseConfigured, setSupabaseConfigured] = useState(false);
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
+  const editCoverFileRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!canManage || !isEditing) return;
+    let active = true;
+    checkSupabaseStorageStatus().then((st) => {
+      if (active) setSupabaseConfigured(st.configured);
+    });
+    return () => {
+      active = false;
+    };
+  }, [canManage, isEditing]);
 
   if (!story) return null;
 
@@ -106,7 +125,7 @@ export function StoryDetailModal({
           .map((k) => k.trim())
           .filter(Boolean),
         description: editDesc.trim(),
-        coverUrl: editCoverUrl.trim() || story.coverUrl,
+        coverUrl: normalizeCoverImageUrl(editCoverUrl.trim()) || story.coverUrl,
       });
       setIsEditing(false);
     } catch (err) {
@@ -383,14 +402,83 @@ export function StoryDetailModal({
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-xs font-medium text-[#4B3B21] dark:text-[#DCD6F0]">
-                    Link ảnh bìa
+                    Link ảnh bìa (Hỗ trợ link share Google Drive — tự chuyển đổi & tối ưu độ nét)
                   </label>
-                  <input
-                    type="text"
-                    value={editCoverUrl}
-                    onChange={(e) => setEditCoverUrl(e.target.value)}
-                    className="w-full rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-sm text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:focus:border-[#8B7AE0]"
-                  />
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {editCoverUrl.trim() && (
+                      <div className="h-14 w-10 shrink-0 overflow-hidden rounded-lg border border-[#DEC999] bg-[#EFE0BA] dark:border-[#37315A] dark:bg-[#262240]">
+                        <CoverImage src={editCoverUrl} alt="Xem trước bìa" targetWidth={128} />
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      maxLength={1000}
+                      value={editCoverUrl}
+                      onChange={(e) => setEditCoverUrl(e.target.value)}
+                      onBlur={(e) => {
+                        const converted = normalizeCoverImageUrl(e.target.value);
+                        if (converted !== e.target.value) {
+                          setEditCoverUrl(converted);
+                        }
+                      }}
+                      placeholder="Dán link ảnh hoặc link Google Drive..."
+                      className="min-w-[200px] flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-sm text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:focus:border-[#8B7AE0]"
+                    />
+                    {supabaseConfigured && (
+                      <>
+                        <input
+                          ref={editCoverFileRef}
+                          type="file"
+                          accept="image/*"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            setIsUploadingCover(true);
+                            setStatusError(null);
+                            try {
+                              const optimized = await optimizeCoverImageFile(file, 600, 800);
+                              const uploadedUrl = await uploadCoverToSupabase(optimized.blob, {
+                                filename: optimized.filename,
+                                storyFolder: 'covers',
+                              });
+                              setEditCoverUrl(uploadedUrl);
+                            } catch (err) {
+                              setStatusError(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Không thể tối ưu và tải ảnh bìa lên.'
+                              );
+                            } finally {
+                              setIsUploadingCover(false);
+                              if (editCoverFileRef.current) editCoverFileRef.current.value = '';
+                            }
+                          }}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          disabled={isUploadingCover}
+                          onClick={() => editCoverFileRef.current?.click()}
+                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] disabled:opacity-60 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#DCD6F0] dark:hover:bg-[#2D284D]"
+                        >
+                          {isUploadingCover ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Upload className="h-3.5 w-3.5" />
+                          )}
+                          <span>{isUploadingCover ? 'Đang nén...' : 'Tải ảnh'}</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  {extractGoogleDriveFileId(editCoverUrl) && (
+                    <p className="mt-1 text-[11px] text-emerald-700 dark:text-emerald-400">
+                      Link hiển thị:{' '}
+                      <span className="font-mono-tabular break-all">
+                        {normalizeCoverImageUrl(editCoverUrl)}
+                      </span>
+                    </p>
+                  )}
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-xs font-medium text-[#4B3B21] dark:text-[#DCD6F0]">
@@ -425,10 +513,10 @@ export function StoryDetailModal({
           ) : (
             <div className="flex flex-col gap-5 sm:flex-row">
               <div className="h-48 w-36 shrink-0 overflow-hidden rounded-xl border border-[#DEC999] bg-[#EFE0BA] dark:border-[#322C52] dark:bg-[#231F3D]">
-                <img
+                <CoverImage
                   src={story.coverUrl}
                   alt={story.title}
-                  referrerPolicy="no-referrer"
+                  targetWidth={480}
                   className="h-full w-full object-cover"
                 />
               </div>

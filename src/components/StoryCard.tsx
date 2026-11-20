@@ -1,7 +1,8 @@
 import {BookOpen, Heart, Pause, Play} from 'lucide-react';
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
 import {formatDuration} from '../utils/format';
+import {CoverImage} from './CoverImage';
 
 interface StoryCardProps {
   story: AudioStory;
@@ -28,6 +29,10 @@ export function StoryCard({
 }: StoryCardProps) {
   const [imgError, setImgError] = useState(false);
 
+  useEffect(() => {
+    setImgError(false);
+  }, [story.coverUrl]);
+
   const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
   const currentChapter = story.chapters[listenerState.lastChapterIndex] || story.chapters[0];
   const chapterDuration = currentChapter?.durationSec || 0;
@@ -40,10 +45,10 @@ export function StoryCard({
     <article className="group flex flex-col overflow-hidden rounded-xl border border-[#DFCCA0] bg-[#FDF8EB] transition-colors duration-150 hover:border-[#C5AB72] dark:border-[#302B4F] dark:bg-[#1E1B33] dark:hover:border-[#4A4278]">
       <div className="relative aspect-[3/4] w-full overflow-hidden bg-[#EADAB2] dark:bg-[#262240]">
         {!imgError && story.coverUrl ? (
-          <img
+          <CoverImage
             src={story.coverUrl}
             alt={`Bìa truyện ${story.title}`}
-            referrerPolicy="no-referrer"
+            targetWidth={540}
             onError={() => setImgError(true)}
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
           />

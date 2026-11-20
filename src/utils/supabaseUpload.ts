@@ -140,3 +140,18 @@ export async function uploadAudioToSupabase(
     mimeType: contentType,
   };
 }
+
+export async function uploadCoverToSupabase(
+  file: Blob,
+  options: {
+    filename: string;
+    storyFolder?: string;
+  }
+): Promise<string> {
+  const result = await uploadAudioToSupabase(file, {
+    filename: options.filename,
+    storyFolder: options.storyFolder || 'covers',
+  });
+  return result.publicUrl;
+}
+

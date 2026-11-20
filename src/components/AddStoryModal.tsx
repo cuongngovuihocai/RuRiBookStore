@@ -21,7 +21,9 @@ import {
   extractGoogleDriveFileId,
   formatDuration,
   getAudioDurationFromUrl,
+  normalizeCoverImageUrl,
   normalizeExternalAudioUrl,
+  optimizeCoverImageFile,
   resolvePlayableAudioUrl,
 } from '../utils/format';
 import type {RuRiTTSImportedDraft, RuRiTTSPendingFile} from '../utils/ruriTtsBridge';
@@ -30,7 +32,9 @@ import {
   getAudioDurationFromBlob,
   type SupabaseStorageStatus,
   uploadAudioToSupabase,
+  uploadCoverToSupabase,
 } from '../utils/supabaseUpload';
+import {CoverImage} from './CoverImage';
 
 type AudioInputMode = 'supabase' | 'single_link' | 'batch_links';
 
@@ -86,7 +90,9 @@ export function AddStoryModal({
   const [supabaseStatus, setSupabaseStatus] = useState<SupabaseStorageStatus | null>(null);
   const [pendingFiles, setPendingFiles] = useState<QueuedAudioFile[]>([]);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const coverFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [editChapterUrl, setEditChapterUrl] = useState('');
@@ -352,7 +358,7 @@ export function AddStoryModal({
           ok: true,
           message:
             hint ||
-            'Đã thêm link Google Drive (chưa đo được sẵn thời lượng — hãy kiểm tra bật Google Drive API và quyền chia sẻ Công khai).',
+            'Đã thêm link Google Drive (sẽ tự dùng trình phát nhúng /preview nếu API chưa cấp quyền).',
         });
       } else {
         setLinkStatus({
@@ -460,7 +466,8 @@ export function AddStoryModal({
       .map((k) => k.trim())
       .filter(Boolean);
 
-    const finalCover = customCoverUrl.trim() || coverUrl;
+    const normalizedCustomCover = normalizeCoverImageUrl(customCoverUrl);
+    const finalCover = normalizedCustomCover || coverUrl;
 
     setIsSubmitting(true);
     setErrorMsg(null);
@@ -1025,7 +1032,7 @@ export function AddStoryModal({
 
             <div className="sm:col-span-2">
               <label className="mb-1.5 block text-xs font-medium text-[#4B3B21] dark:text-[#DCD6F0]">
-                Ảnh bìa (Chọn mẫu có sẵn hoặc dán link ảnh)
+                Ảnh bìa (Chọn mẫu, tải ảnh từ máy hoặc dán link Google Drive — tự tối ưu độ nét)
               </label>
               <div className="flex flex-wrap items-center gap-3">
                 {CURATED_COVERS.map((c) => (
@@ -1043,17 +1050,89 @@ export function AddStoryModal({
                     }`}
                     title={c.label}
                   >
-                    <img src={c.url} alt={c.label} className="h-full w-full object-cover" />
+                    <CoverImage src={c.url} alt={c.label} targetWidth={128} />
                   </button>
                 ))}
-                <input
-                  type="url"
-                  value={customCoverUrl}
-                  onChange={(e) => setCustomCoverUrl(e.target.value)}
-                  placeholder="Hoặc dán URL ảnh bìa (https://...)"
-                  className="min-w-[200px] flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
-                />
+                {customCoverUrl.trim() && (
+                  <div
+                    className="relative h-16 w-12 shrink-0 overflow-hidden rounded-lg border-2 border-[#7A4B0C] bg-[#EADAB2] dark:border-[#8B7AE0] dark:bg-[#262240]"
+                    title="Xem trước ảnh bìa"
+                  >
+                    <CoverImage
+                      src={customCoverUrl}
+                      alt="Xem trước bìa"
+                      targetWidth={128}
+                    />
+                  </div>
+                )}
+                <div className="flex min-w-[220px] flex-1 flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    maxLength={1000}
+                    value={customCoverUrl}
+                    onChange={(e) => setCustomCoverUrl(e.target.value)}
+                    onBlur={(e) => {
+                      const converted = normalizeCoverImageUrl(e.target.value);
+                      if (converted !== e.target.value) {
+                        setCustomCoverUrl(converted);
+                      }
+                    }}
+                    placeholder="Dán URL ảnh hoặc link share Google Drive..."
+                    className="min-w-[180px] flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-xs text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
+                  />
+                  {supabaseStatus?.configured && (
+                    <>
+                      <input
+                        ref={coverFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          setIsUploadingCover(true);
+                          setErrorMsg(null);
+                          try {
+                            const optimized = await optimizeCoverImageFile(file, 600, 800);
+                            const uploadedUrl = await uploadCoverToSupabase(optimized.blob, {
+                              filename: optimized.filename,
+                              storyFolder: 'covers',
+                            });
+                            setCustomCoverUrl(uploadedUrl);
+                          } catch (err) {
+                            setErrorMsg(
+                              err instanceof Error
+                                ? err.message
+                                : 'Không thể tối ưu và tải ảnh bìa lên.'
+                            );
+                          } finally {
+                            setIsUploadingCover(false);
+                            if (coverFileInputRef.current) coverFileInputRef.current.value = '';
+                          }
+                        }}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        disabled={isUploadingCover}
+                        onClick={() => coverFileInputRef.current?.click()}
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-2.5 py-1.5 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] disabled:opacity-60 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#DCD6F0] dark:hover:bg-[#2D284D]"
+                      >
+                        {isUploadingCover ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Upload className="h-3.5 w-3.5" />
+                        )}
+                        <span>{isUploadingCover ? 'Đang nén...' : 'Tải ảnh'}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
+              {extractGoogleDriveFileId(customCoverUrl) && (
+                <p className="mt-1.5 text-[11px] text-emerald-700 dark:text-emerald-400">
+                  Link hiển thị: <span className="font-mono-tabular break-all">{normalizeCoverImageUrl(customCoverUrl)}</span>
+                </p>
+              )}
             </div>
 
             <div className="sm:col-span-2">
