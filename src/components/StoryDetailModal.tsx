@@ -9,6 +9,7 @@ import {
   Pause,
   Play,
   Plus,
+  Share2,
   Trash2,
   Upload,
   X,
@@ -16,6 +17,8 @@ import {
 import {useEffect, useRef, useState} from 'react';
 import type {AudioChapter, AudioStory, CategoryDoc, ListenerStoryState} from '../types';
 import {
+  buildStoryShareUrl,
+  copyTextToClipboard,
   diagnoseGoogleDriveFile,
   extractGoogleDriveFileId,
   formatDuration,
@@ -83,7 +86,12 @@ export function StoryDetailModal({
   const [statusError, setStatusError] = useState<string | null>(null);
   const [supabaseConfigured, setSupabaseConfigured] = useState(false);
   const [isUploadingCover, setIsUploadingCover] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const editCoverFileRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setCopiedLink(false);
+  }, [story?.id]);
 
   useEffect(() => {
     if (!canManage || !isEditing) return;
@@ -97,6 +105,14 @@ export function StoryDetailModal({
   }, [canManage, isEditing]);
 
   if (!story) return null;
+
+  const handleShareStory = async () => {
+    const ok = await copyTextToClipboard(buildStoryShareUrl(story.id));
+    if (ok) {
+      setCopiedLink(true);
+      window.setTimeout(() => setCopiedLink(false), 2500);
+    }
+  };
 
   const startEdit = () => {
     setEditTitle(story.title);
@@ -276,6 +292,29 @@ export function StoryDetailModal({
             {canManage && !story.isPublished ? ' · Bản nháp' : ''}
           </span>
           <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleShareStory}
+              className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors ${
+                copiedLink
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : 'text-[#4B3B21] hover:bg-[#EFE0BA] dark:text-[#DCD6F0] dark:hover:bg-[#292447]'
+              }`}
+              title="Sao chép link riêng của truyện này để chia sẻ"
+              aria-label="Chia sẻ link truyện"
+            >
+              {copiedLink ? (
+                <>
+                  <Check className="h-3.5 w-3.5" />
+                  <span>Đã chép link</span>
+                </>
+              ) : (
+                <>
+                  <Share2 className="h-3.5 w-3.5" />
+                  <span>Chia sẻ</span>
+                </>
+              )}
+            </button>
             <button
               type="button"
               onClick={() => onToggleFavorite(story)}

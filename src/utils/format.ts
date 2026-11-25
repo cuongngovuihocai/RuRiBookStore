@@ -443,3 +443,62 @@ export async function optimizeCoverImageFile(
   }
 }
 
+export function buildStoryShareUrl(storyId: string): string {
+  if (typeof window === 'undefined') return `/?story=${encodeURIComponent(storyId)}`;
+  return `${window.location.origin}/?story=${encodeURIComponent(storyId)}`;
+}
+
+export function extractStoryIdFromLocation(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  const params = new URLSearchParams(window.location.search);
+  const qStory = params.get('story')?.trim();
+  if (qStory) return qStory;
+
+  const hashMatch = window.location.hash.match(/^#\/story\/([^/?#]+)/i);
+  if (hashMatch?.[1]) {
+    try {
+      return decodeURIComponent(hashMatch[1]).trim() || null;
+    } catch {
+      return hashMatch[1].trim() || null;
+    }
+  }
+
+  const pathMatch = window.location.pathname.match(/^\/story\/([^/?#]+)/i);
+  if (pathMatch?.[1]) {
+    try {
+      return decodeURIComponent(pathMatch[1]).trim() || null;
+    } catch {
+      return pathMatch[1].trim() || null;
+    }
+  }
+
+  return null;
+}
+
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fallback below
+    }
+  }
+
+  if (typeof document === 'undefined') return false;
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}

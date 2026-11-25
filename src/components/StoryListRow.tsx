@@ -1,7 +1,7 @@
-import {BookOpen, Heart, Pause, Play} from 'lucide-react';
+import {BookOpen, Check, Heart, Pause, Play, Share2} from 'lucide-react';
 import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
-import {formatDuration} from '../utils/format';
+import {buildStoryShareUrl, copyTextToClipboard, formatDuration} from '../utils/format';
 import {CoverImage} from './CoverImage';
 
 interface StoryListRowProps {
@@ -28,10 +28,19 @@ export function StoryListRow({
   onSelectKeyword,
 }: StoryListRowProps) {
   const [imgError, setImgError] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   useEffect(() => {
     setImgError(false);
   }, [story.coverUrl]);
+
+  const handleShare = async () => {
+    const ok = await copyTextToClipboard(buildStoryShareUrl(story.id));
+    if (ok) {
+      setCopiedLink(true);
+      window.setTimeout(() => setCopiedLink(false), 2000);
+    }
+  };
   const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
 
   return (
@@ -116,6 +125,20 @@ export function StoryListRow({
       </div>
 
       <div className="flex items-center justify-end gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={handleShare}
+          aria-label="Chia sẻ link truyện"
+          title={copiedLink ? 'Đã sao chép link!' : 'Chia sẻ / Sao chép link truyện'}
+          className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[#DEC999] text-[#5C492B] hover:bg-[#F3E5BF] dark:border-[#37315A] dark:text-[#D6CFF0] dark:hover:bg-[#292447]"
+        >
+          {copiedLink ? (
+            <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+          ) : (
+            <Share2 className="h-4 w-4" />
+          )}
+        </button>
+
         <button
           type="button"
           onClick={() => onToggleFavorite(story)}

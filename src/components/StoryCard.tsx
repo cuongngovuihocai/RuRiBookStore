@@ -1,7 +1,7 @@
-import {BookOpen, Heart, Pause, Play} from 'lucide-react';
+import {BookOpen, Check, Heart, Pause, Play, Share2} from 'lucide-react';
 import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
-import {formatDuration} from '../utils/format';
+import {buildStoryShareUrl, copyTextToClipboard, formatDuration} from '../utils/format';
 import {CoverImage} from './CoverImage';
 
 interface StoryCardProps {
@@ -28,10 +28,20 @@ export function StoryCard({
   onSelectKeyword,
 }: StoryCardProps) {
   const [imgError, setImgError] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   useEffect(() => {
     setImgError(false);
   }, [story.coverUrl]);
+
+  const handleShare = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const ok = await copyTextToClipboard(buildStoryShareUrl(story.id));
+    if (ok) {
+      setCopiedLink(true);
+      window.setTimeout(() => setCopiedLink(false), 2000);
+    }
+  };
 
   const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
   const currentChapter = story.chapters[listenerState.lastChapterIndex] || story.chapters[0];
@@ -66,18 +76,37 @@ export function StoryCard({
 
         <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent opacity-80 transition-opacity group-hover:opacity-100" />
 
-        <button
-          type="button"
-          onClick={() => onToggleFavorite(story)}
-          aria-label={listenerState.isFavorite ? 'Bỏ yêu thích' : 'Thêm vào yêu thích'}
-          className="absolute top-3 right-3 inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-xs transition-colors hover:bg-black/70 focus-visible:outline-2 focus-visible:outline-white"
-        >
-          <Heart
-            className={`h-4 w-4 ${
-              listenerState.isFavorite ? 'fill-rose-400 text-rose-400' : 'text-white'
-            }`}
-          />
-        </button>
+        <div className="absolute top-3 right-3 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleShare}
+            aria-label="Sao chép link chia sẻ truyện"
+            title={copiedLink ? 'Đã sao chép link!' : 'Chia sẻ / Sao chép link truyện'}
+            className="inline-flex h-9 items-center justify-center gap-1 rounded-full bg-black/45 px-2.5 text-xs font-medium text-white backdrop-blur-xs transition-colors hover:bg-black/70 focus-visible:outline-2 focus-visible:outline-white"
+          >
+            {copiedLink ? (
+              <>
+                <Check className="h-3.5 w-3.5 text-emerald-300" />
+                <span className="text-[11px] text-emerald-200">Đã chép</span>
+              </>
+            ) : (
+              <Share2 className="h-4 w-4" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleFavorite(story)}
+            aria-label={listenerState.isFavorite ? 'Bỏ yêu thích' : 'Thêm vào yêu thích'}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-xs transition-colors hover:bg-black/70 focus-visible:outline-2 focus-visible:outline-white"
+          >
+            <Heart
+              className={`h-4 w-4 ${
+                listenerState.isFavorite ? 'fill-rose-400 text-rose-400' : 'text-white'
+              }`}
+            />
+          </button>
+        </div>
 
         <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-2">
           <button

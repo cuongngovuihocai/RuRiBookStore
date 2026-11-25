@@ -51,9 +51,14 @@ import type {
   SortOption,
   ViewMode,
 } from './types';
-import {removeVietnameseTones} from './utils/format';
+import {
+  buildStoryShareUrl,
+  extractStoryIdFromLocation,
+  removeVietnameseTones,
+} from './utils/format';
 import {parseRuRiTTSMessage, type RuRiTTSImportedDraft} from './utils/ruriTtsBridge';
 
+const DEFAULT_PAGE_TITLE = 'Tủ sách Rủ Rỉ Rù Rì — Lưu Trữ & Nghe Truyện Audio Trực Tuyến';
 const LISTENER_STATE_KEY = 'ts_listener_state_v1';
 const DEFAULT_LISTENER_STATE: ListenerStoryState = {
   isFavorite: false,
@@ -126,11 +131,44 @@ export default function App() {
     }
   }, [isDarkMode]);
 
+  const syncStoryUrl = useCallback(
+    (storyId: string | null, usePush = false) => {
+      if (routeMode !== 'listener') return;
+      const url = new URL(window.location.href);
+      if (url.pathname.startsWith('/story/')) {
+        url.pathname = '/';
+      }
+      if (/^#\/story\//i.test(url.hash)) {
+        url.hash = '';
+      }
+      if (storyId) {
+        url.searchParams.set('story', storyId);
+      } else {
+        url.searchParams.delete('story');
+      }
+      const nextHref = `${url.pathname}${url.search}${url.hash}`;
+      const currentHref = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (nextHref === currentHref) return;
+      if (usePush) {
+        window.history.pushState(null, '', nextHref);
+      } else {
+        window.history.replaceState(null, '', nextHref);
+      }
+    },
+    [routeMode]
+  );
+
   // Sync browser back/forward & hash changes
   useEffect(() => {
     const onNavChange = () => {
-      setRouteMode(detectRouteMode());
+      const nextMode = detectRouteMode();
+      setRouteMode(nextMode);
       setActiveSection('all');
+      if (nextMode === 'listener') {
+        setDetailStoryId(extractStoryIdFromLocation());
+      } else {
+        setDetailStoryId(null);
+      }
     };
     window.addEventListener('popstate', onNavChange);
     window.addEventListener('hashchange', onNavChange);
@@ -143,9 +181,13 @@ export default function App() {
   const switchRoute = useCallback((mode: AppRouteMode) => {
     setRouteMode(mode);
     setActiveSection('all');
-    const targetPath = mode === 'admin' ? '#/admin' : '#/';
-    if (window.location.hash !== targetPath) {
-      window.history.pushState(null, '', targetPath);
+    if (mode === 'admin') {
+      setDetailStoryId(null);
+      const url = new URL(window.location.href);
+      url.searchParams.delete('story');
+      window.history.pushState(null, '', `${url.pathname}${url.search}#/admin`);
+    } else {
+      window.history.pushState(null, '', '/');
     }
   }, []);
 
@@ -206,6 +248,10 @@ export default function App() {
   const [isRuRiTTSModalOpen, setIsRuRiTTSModalOpen] = useState(false);
   const [importedTtsDraft, setImportedTtsDraft] = useState<RuRiTTSImportedDraft | null>(null);
   const [detailStoryId, setDetailStoryId] = useState<string | null>(null);
+  const [pendingSharedStoryId, setPendingSharedStoryId] = useState<string | null>(() =>
+    extractStoryIdFromLocation()
+  );
+  const [sharedLinkNotice, setSharedLinkNotice] = useState<string | null>(null);
   const [isSeeding, setIsSeeding] = useState(false);
   const [appAvatarPreview, setAppAvatarPreview] = useState<string | null>(() => {
     try {
@@ -361,6 +407,51 @@ export default function App() {
     [stories, detailStoryId]
   );
 
+  // Open shared story automatically once library finishes loading
+  useEffect(() => {
+    if (!pendingSharedStoryId || isLoading) return;
+    if (routeMode === 'admin' && authLoading) return;
+
+    const match = stories.find(
+      (s) => s.id === pendingSharedStoryId && (routeMode === 'admin' || s.isPublished)
+    );
+    if (match) {
+      setDetailStoryId(match.id);
+      setSharedLinkNotice(null);
+      if (routeMode === 'listener') {
+        const expected = `${window.location.pathname}${window.location.search}`;
+        const normalized = new URL(buildStoryShareUrl(match.id));
+        if (expected !== `${normalized.pathname}${normalized.search}` || window.location.hash) {
+          window.history.replaceState(null, '', `${normalized.pathname}${normalized.search}`);
+        }
+      }
+    } else if (!loadError) {
+      setSharedLinkNotice('Không tìm thấy truyện từ đường dẫn chia sẻ (truyện có thể đã bị xoá hoặc đang ở chế độ nháp).');
+      syncStoryUrl(null, false);
+    }
+    setPendingSharedStoryId(null);
+  }, [pendingSharedStoryId, isLoading, stories, routeMode, authLoading, loadError, syncStoryUrl]);
+
+  // Keep page title synced with active story
+  useEffect(() => {
+    const active = detailStory || currentStory;
+    document.title = active ? `${active.title} — Tủ sách Rủ Rỉ Rù Rì` : DEFAULT_PAGE_TITLE;
+  }, [detailStory, currentStory]);
+
+  const handleOpenDetail = useCallback(
+    (story: AudioStory) => {
+      setSharedLinkNotice(null);
+      setDetailStoryId(story.id);
+      syncStoryUrl(story.id, true);
+    },
+    [syncStoryUrl]
+  );
+
+  const handleCloseDetail = useCallback(() => {
+    setDetailStoryId(null);
+    syncStoryUrl(currentStoryId, false);
+  }, [syncStoryUrl, currentStoryId]);
+
   const handleSelectSection = (section: NavSection) => {
     if (section === 'backup') {
       setIsBackupModalOpen(true);
@@ -379,6 +470,9 @@ export default function App() {
     setCurrentChapterIndex(ls.lastChapterIndex || 0);
     setIsPlaying(true);
     updateListenerState(story.id, {lastPlayedAt: new Date().toISOString()});
+    if (!detailStoryId) {
+      syncStoryUrl(story.id, false);
+    }
   };
 
   const handlePlayChapter = (story: AudioStory, chapterIdx: number) => {
@@ -760,6 +854,21 @@ export default function App() {
               )}
             </div>
 
+            {/* Shared link notice if story unavailable */}
+            {sharedLinkNotice && (
+              <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200">
+                <span>{sharedLinkNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setSharedLinkNotice(null)}
+                  className="rounded p-1 hover:bg-amber-200/60 dark:hover:bg-amber-900/50"
+                  aria-label="Đóng thông báo"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Content States */}
             {loadError ? (
               <div className="rounded-xl border border-rose-200 bg-rose-50 p-6 text-center dark:border-rose-900/40 dark:bg-rose-950/30">
@@ -850,7 +959,7 @@ export default function App() {
                     isCurrentStory={currentStoryId === story.id}
                     isPlaying={isPlaying}
                     onPlayStory={handlePlayStory}
-                    onOpenDetail={(s) => setDetailStoryId(s.id)}
+                    onOpenDetail={handleOpenDetail}
                     onToggleFavorite={handleToggleFavorite}
                     onSelectKeyword={(kw) => setSelectedKeyword((prev) => (prev === kw ? null : kw))}
                   />
@@ -867,7 +976,7 @@ export default function App() {
                     isCurrentStory={currentStoryId === story.id}
                     isPlaying={isPlaying}
                     onPlayStory={handlePlayStory}
-                    onOpenDetail={(s) => setDetailStoryId(s.id)}
+                    onOpenDetail={handleOpenDetail}
                     onToggleFavorite={handleToggleFavorite}
                     onSelectKeyword={(kw) => setSelectedKeyword((prev) => (prev === kw ? null : kw))}
                   />
@@ -900,10 +1009,11 @@ export default function App() {
         onPlayingChange={setIsPlaying}
         onChangeChapter={(idx) => setCurrentChapterIndex(idx)}
         onSaveProgress={handleSaveProgress}
-        onOpenStoryDetail={(s) => setDetailStoryId(s.id)}
+        onOpenStoryDetail={handleOpenDetail}
         onClosePlayer={() => {
           setIsPlaying(false);
           setCurrentStoryId(null);
+          syncStoryUrl(detailStoryId, false);
         }}
       />
 
@@ -960,7 +1070,7 @@ export default function App() {
         currentStoryId={currentStoryId}
         currentChapterIndex={currentChapterIndex}
         isPlaying={isPlaying}
-        onClose={() => setDetailStoryId(null)}
+        onClose={handleCloseDetail}
         onPlayChapter={handlePlayChapter}
         onToggleFavorite={handleToggleFavorite}
         onUpdateStory={updateStoryDoc}
