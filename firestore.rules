@@ -62,6 +62,10 @@ service cloud.firestore {
         'coverUrl',
         'chapters',
         'isPublished',
+        'isLocked',
+        'accessSalt',
+        'lockedPayload',
+        'lockedChapterCount',
         'createdBy',
         'createdAt',
         'updatedAt'
@@ -73,6 +77,10 @@ service cloud.firestore {
       data.description is string && data.description.size() <= 2500 &&
       data.coverUrl is string && data.coverUrl.size() <= 1000 &&
       data.isPublished is bool &&
+      (!('isLocked' in data) || data.isLocked is bool) &&
+      (!('accessSalt' in data) || (data.accessSalt is string && data.accessSalt.size() <= 64)) &&
+      (!('lockedPayload' in data) || (data.lockedPayload is string && data.lockedPayload.size() <= 250000)) &&
+      (!('lockedChapterCount' in data) || (data.lockedChapterCount is number && data.lockedChapterCount >= 0 && data.lockedChapterCount <= 200)) &&
       data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
       data.createdBy == request.auth.uid &&
       data.keywords is list && data.keywords.size() <= 20 &&
@@ -80,6 +88,30 @@ service cloud.firestore {
       data.chapters is list && data.chapters.size() >= 1 && data.chapters.size() <= 200 &&
       data.chapters[0] is map &&
       data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAdminVault(data) {
+      return data.keys().hasAll([
+        'description',
+        'chapters',
+        'lockPassword',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'description',
+        'chapters',
+        'lockPassword',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.description is string && data.description.size() <= 2500 &&
+      data.chapters is list && data.chapters.size() >= 1 && data.chapters.size() <= 200 &&
+      data.chapters[0] is map &&
+      data.lockPassword is string && data.lockPassword.size() >= 1 && data.lockPassword.size() <= 100 &&
+      data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
+      data.updatedBy == request.auth.uid &&
       data.updatedAt is timestamp;
     }
 
@@ -119,10 +151,48 @@ service cloud.firestore {
           'coverUrl',
           'chapters',
           'isPublished',
+          'isLocked',
+          'accessSalt',
+          'lockedPayload',
+          'lockedChapterCount',
           'updatedAt'
         ]) &&
         isAdmin();
       allow delete: if isSignedIn() && isValidId(storyId) && isAdmin();
+
+      match /adminVault/{docId} {
+        allow get: if isSignedIn() &&
+          isValidId(storyId) &&
+          docId == 'content' &&
+          isAdmin() &&
+          exists(/databases/$(database)/documents/stories/$(storyId));
+        allow list: if false;
+        allow create: if isSignedIn() &&
+          isValidId(storyId) &&
+          docId == 'content' &&
+          isValidAdminVault(incoming()) &&
+          incoming().updatedAt == request.time &&
+          isAdmin() &&
+          exists(/databases/$(database)/documents/stories/$(storyId));
+        allow update: if isSignedIn() &&
+          isValidId(storyId) &&
+          docId == 'content' &&
+          isValidAdminVault(incoming()) &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'description',
+            'chapters',
+            'lockPassword',
+            'updatedBy',
+            'updatedAt'
+          ]) &&
+          isAdmin() &&
+          exists(/databases/$(database)/documents/stories/$(storyId));
+        allow delete: if isSignedIn() &&
+          isValidId(storyId) &&
+          docId == 'content' &&
+          isAdmin();
+      }
     }
 
     match /categories/{categoryId} {

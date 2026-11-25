@@ -1,4 +1,4 @@
-import {BookOpen, Check, Heart, Pause, Play, Share2} from 'lucide-react';
+import {BookOpen, Check, Heart, Lock, LockOpen, Pause, Play, Share2} from 'lucide-react';
 import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
 import {buildStoryShareUrl, copyTextToClipboard, formatDuration} from '../utils/format';
@@ -8,6 +8,7 @@ interface StoryCardProps {
   story: AudioStory;
   listenerState: ListenerStoryState;
   isAdminView: boolean;
+  isUnlocked?: boolean;
   isCurrentStory: boolean;
   isPlaying: boolean;
   onPlayStory: (story: AudioStory) => void;
@@ -20,6 +21,7 @@ export function StoryCard({
   story,
   listenerState,
   isAdminView,
+  isUnlocked = false,
   isCurrentStory,
   isPlaying,
   onPlayStory,
@@ -43,11 +45,18 @@ export function StoryCard({
     }
   };
 
-  const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
+  const requiresUnlock = Boolean(story.isLocked && !isUnlocked);
+  const displayChapterCount =
+    story.isLocked && !isUnlocked
+      ? story.lockedChapterCount || story.chapters.length
+      : story.chapters.length;
+  const totalDuration = requiresUnlock
+    ? 0
+    : story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
   const currentChapter = story.chapters[listenerState.lastChapterIndex] || story.chapters[0];
   const chapterDuration = currentChapter?.durationSec || 0;
   const progressRatio =
-    chapterDuration > 0 && listenerState.lastPositionSec > 0
+    !requiresUnlock && chapterDuration > 0 && listenerState.lastPositionSec > 0
       ? Math.min(1, listenerState.lastPositionSec / chapterDuration)
       : 0;
 
@@ -77,6 +86,22 @@ export function StoryCard({
         <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent opacity-80 transition-opacity group-hover:opacity-100" />
 
         <div className="absolute top-3 right-3 flex items-center gap-1.5">
+          {story.isLocked && (
+            <button
+              type="button"
+              onClick={() => onOpenDetail(story)}
+              aria-label={requiresUnlock ? 'Truyện có mật khẩu' : 'Truyện đã mở khoá'}
+              title={requiresUnlock ? 'Truyện có mật khẩu' : 'Đã mở khoá'}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-xs transition-colors hover:bg-black/70 focus-visible:outline-2 focus-visible:outline-white"
+            >
+              {requiresUnlock ? (
+                <Lock className="h-4 w-4 text-amber-300" />
+              ) : (
+                <LockOpen className="h-4 w-4 text-emerald-300" />
+              )}
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleShare}
@@ -114,7 +139,12 @@ export function StoryCard({
             onClick={() => onPlayStory(story)}
             className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#FFFDF6] px-3.5 py-2 text-xs font-semibold text-[#2B2111] shadow-sm transition-colors hover:bg-[#F5E8C7] focus-visible:outline-2 focus-visible:outline-white whitespace-nowrap dark:bg-[#F1ECF8] dark:text-[#141224] dark:hover:bg-white"
           >
-            {isCurrentStory && isPlaying ? (
+            {requiresUnlock ? (
+              <>
+                <Lock className="h-3.5 w-3.5" />
+                <span>Mở khoá & Nghe</span>
+              </>
+            ) : isCurrentStory && isPlaying ? (
               <>
                 <Pause className="h-3.5 w-3.5 fill-current" />
                 <span>Tạm dừng</span>
@@ -152,7 +182,7 @@ export function StoryCard({
             </span>
             <span aria-hidden="true">·</span>
             <span className="font-mono-tabular whitespace-nowrap">
-              {story.chapters.length} chương
+              {displayChapterCount} chương
             </span>
             {totalDuration > 0 && (
               <>

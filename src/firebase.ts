@@ -9,6 +9,7 @@ import {
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocFromServer,
@@ -24,7 +25,12 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import type {AudioChapter, AudioStory, CategoryDoc} from './types';
+import type {AudioChapter, AudioStory, CategoryDoc, StoryAdminVault} from './types';
+import {
+  encryptStorySecret,
+  LOCKED_PLACEHOLDER_CHAPTERS,
+  LOCKED_PLACEHOLDER_DESCRIPTION,
+} from './utils/storyLock';
 
 export const ADMIN_EMAIL = 'cuongngovuihocai@gmail.com';
 
@@ -166,10 +172,32 @@ function mapStoryDoc(id: string, data: Record<string, unknown>): AudioStory {
     coverUrl: String(data.coverUrl || '/src/assets/images/cover_novel_rain_1794949188336.jpg'),
     chapters: Array.isArray(data.chapters) ? (data.chapters as AudioChapter[]) : [],
     isPublished: Boolean(data.isPublished),
+    isLocked: Boolean(data.isLocked),
+    ...(typeof data.accessSalt === 'string' ? {accessSalt: data.accessSalt} : {}),
+    ...(typeof data.lockedPayload === 'string' ? {lockedPayload: data.lockedPayload} : {}),
+    ...(typeof data.lockedChapterCount === 'number'
+      ? {lockedChapterCount: data.lockedChapterCount}
+      : {}),
     createdBy: String(data.createdBy || ''),
     createdAt: timestampToIso(data.createdAt),
     updatedAt: timestampToIso(data.updatedAt),
   };
+}
+
+export async function loadStoryAdminVault(storyId: string): Promise<StoryAdminVault | null> {
+  const path = `stories/${storyId}/adminVault/content`;
+  try {
+    const snap = await getDoc(doc(db, 'stories', storyId, 'adminVault', 'content'));
+    if (!snap.exists()) return null;
+    const data = snap.data() as Record<string, unknown>;
+    return {
+      description: String(data.description || ''),
+      chapters: Array.isArray(data.chapters) ? (data.chapters as AudioChapter[]) : [],
+      lockPassword: String(data.lockPassword || ''),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
 }
 
 export function subscribeStories(
@@ -245,38 +273,65 @@ export async function createStoryDoc(
     coverUrl: string;
     chapters: AudioChapter[];
     isPublished?: boolean;
+    lockPassword?: string;
   },
   adminUid: string
 ): Promise<string> {
   const storyId = sanitizeId(input.id || `story-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   const path = `stories/${storyId}`;
+  const cleanDescription = (input.description || '').trim().slice(0, 2500);
+  const cleanChapters = sanitizeChapters(input.chapters);
+  const cleanLockPass = (input.lockPassword || '').trim().slice(0, 100);
 
-  const payload = {
+  let encryptedLock: {accessSalt: string; lockedPayload: string} | null = null;
+  if (cleanLockPass) {
+    encryptedLock = await encryptStorySecret(
+      {description: cleanDescription, chapters: cleanChapters},
+      cleanLockPass
+    );
+  }
+
+  const payload: Record<string, unknown> = {
     title: input.title.trim().slice(0, 200),
     author: (input.author || 'Chưa rõ tác giả').trim().slice(0, 150),
     narrator: (input.narrator || 'Chưa rõ giọng đọc').trim().slice(0, 150),
     category: (input.category || 'Truyện ngắn').trim().slice(0, 80),
     keywords: sanitizeKeywords(input.keywords),
-    description: (input.description || '').trim().slice(0, 2500),
+    description: encryptedLock ? LOCKED_PLACEHOLDER_DESCRIPTION : cleanDescription,
     coverUrl: (input.coverUrl || '/src/assets/images/cover_novel_rain_1794949188336.jpg').trim().slice(0, 1000),
-    chapters: sanitizeChapters(input.chapters),
+    chapters: encryptedLock ? LOCKED_PLACEHOLDER_CHAPTERS : cleanChapters,
     isPublished: input.isPublished !== false,
+    isLocked: Boolean(encryptedLock),
     createdBy: adminUid,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 
+  if (encryptedLock) {
+    payload.accessSalt = encryptedLock.accessSalt;
+    payload.lockedPayload = encryptedLock.lockedPayload.slice(0, 250000);
+    payload.lockedChapterCount = cleanChapters.length;
+  }
+
   try {
     await setDoc(doc(db, 'stories', storyId), payload);
+    if (encryptedLock) {
+      await setDoc(doc(db, 'stories', storyId, 'adminVault', 'content'), {
+        description: cleanDescription,
+        chapters: cleanChapters,
+        lockPassword: cleanLockPass,
+        updatedBy: adminUid,
+        updatedAt: serverTimestamp(),
+      });
+    }
     return storyId;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
 }
 
-export async function updateStoryDoc(
-  storyId: string,
-  patch: Partial<
+export interface UpdateStoryPatch
+  extends Partial<
     Pick<
       AudioStory,
       | 'title'
@@ -289,9 +344,13 @@ export async function updateStoryDoc(
       | 'chapters'
       | 'isPublished'
     >
-  >
-): Promise<void> {
+  > {
+  lockConfig?: {enabled: boolean; password?: string};
+}
+
+export async function updateStoryDoc(storyId: string, patch: UpdateStoryPatch): Promise<void> {
   const path = `stories/${storyId}`;
+  const adminUid = auth.currentUser?.uid;
   const cleanPatch: Record<string, unknown> = {
     updatedAt: serverTimestamp(),
   };
@@ -300,14 +359,102 @@ export async function updateStoryDoc(
   if (patch.author !== undefined) cleanPatch.author = patch.author.trim().slice(0, 150);
   if (patch.narrator !== undefined) cleanPatch.narrator = patch.narrator.trim().slice(0, 150);
   if (patch.category !== undefined) cleanPatch.category = patch.category.trim().slice(0, 80);
-  if (patch.description !== undefined) cleanPatch.description = patch.description.trim().slice(0, 2500);
   if (patch.coverUrl !== undefined) cleanPatch.coverUrl = patch.coverUrl.trim().slice(0, 1000);
   if (patch.keywords !== undefined) cleanPatch.keywords = sanitizeKeywords(patch.keywords);
-  if (patch.chapters !== undefined) cleanPatch.chapters = sanitizeChapters(patch.chapters);
   if (patch.isPublished !== undefined) cleanPatch.isPublished = Boolean(patch.isPublished);
 
   try {
-    await updateDoc(doc(db, 'stories', storyId), cleanPatch);
+    const storyRef = doc(db, 'stories', storyId);
+    const storySnap = await getDoc(storyRef);
+    const existingData = (storySnap.data() || {}) as Record<string, unknown>;
+    const currentlyLocked = Boolean(existingData.isLocked);
+
+    const needsLockHandling =
+      patch.lockConfig !== undefined ||
+      (currentlyLocked && (patch.chapters !== undefined || patch.description !== undefined));
+
+    if (!needsLockHandling) {
+      if (patch.description !== undefined) {
+        cleanPatch.description = patch.description.trim().slice(0, 2500);
+      }
+      if (patch.chapters !== undefined) {
+        cleanPatch.chapters = sanitizeChapters(patch.chapters);
+      }
+      await updateDoc(storyRef, cleanPatch);
+      return;
+    }
+
+    const vault = currentlyLocked ? await loadStoryAdminVault(storyId) : null;
+    const realDescription = (
+      patch.description !== undefined
+        ? patch.description
+        : vault?.description ?? String(existingData.description || '')
+    )
+      .trim()
+      .slice(0, 2500);
+
+    const realChapters = sanitizeChapters(
+      patch.chapters !== undefined
+        ? patch.chapters
+        : vault?.chapters?.length
+          ? vault.chapters
+          : ((existingData.chapters as AudioChapter[]) || [])
+    );
+
+    const targetLocked =
+      patch.lockConfig !== undefined ? patch.lockConfig.enabled : currentlyLocked;
+
+    if (targetLocked) {
+      const targetPassword = (
+        patch.lockConfig?.password !== undefined
+          ? patch.lockConfig.password
+          : vault?.lockPassword || ''
+      )
+        .trim()
+        .slice(0, 100);
+
+      if (!targetPassword) {
+        throw new Error('Vui lòng nhập mật khẩu để khoá truyện.');
+      }
+      if (!adminUid) {
+        throw new Error('Cần đăng nhập Admin để cập nhật khoá truyện.');
+      }
+
+      const encrypted = await encryptStorySecret(
+        {description: realDescription, chapters: realChapters},
+        targetPassword
+      );
+
+      cleanPatch.isLocked = true;
+      cleanPatch.accessSalt = encrypted.accessSalt;
+      cleanPatch.lockedPayload = encrypted.lockedPayload.slice(0, 250000);
+      cleanPatch.lockedChapterCount = realChapters.length;
+      cleanPatch.description = LOCKED_PLACEHOLDER_DESCRIPTION;
+      cleanPatch.chapters = LOCKED_PLACEHOLDER_CHAPTERS;
+
+      await updateDoc(storyRef, cleanPatch);
+      await setDoc(doc(db, 'stories', storyId, 'adminVault', 'content'), {
+        description: realDescription,
+        chapters: realChapters,
+        lockPassword: targetPassword,
+        updatedBy: adminUid,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      cleanPatch.isLocked = false;
+      cleanPatch.accessSalt = deleteField();
+      cleanPatch.lockedPayload = deleteField();
+      cleanPatch.lockedChapterCount = deleteField();
+      cleanPatch.description = realDescription;
+      cleanPatch.chapters = realChapters;
+
+      await updateDoc(storyRef, cleanPatch);
+      try {
+        await deleteDoc(doc(db, 'stories', storyId, 'adminVault', 'content'));
+      } catch {
+        // Ignore if vault did not exist
+      }
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -316,6 +463,11 @@ export async function updateStoryDoc(
 export async function deleteStoryDoc(storyId: string): Promise<void> {
   const path = `stories/${storyId}`;
   try {
+    try {
+      await deleteDoc(doc(db, 'stories', storyId, 'adminVault', 'content'));
+    } catch {
+      // Ignore if vault does not exist
+    }
     await deleteDoc(doc(db, 'stories', storyId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);

@@ -49,6 +49,24 @@
           "type": "boolean",
           "description": "Whether the story is visible on the public listener catalog."
         },
+        "isLocked": {
+          "type": "boolean",
+          "description": "Whether this story requires a password to view and listen."
+        },
+        "accessSalt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Random hex salt for PBKDF2 key derivation when locked."
+        },
+        "lockedPayload": {
+          "type": "string",
+          "maxLength": 250000,
+          "description": "AES-GCM encrypted chapters and description payload when locked."
+        },
+        "lockedChapterCount": {
+          "type": "number",
+          "description": "Chapter count metadata shown before unlock."
+        },
         "createdBy": {
           "type": "string",
           "maxLength": 128,
@@ -79,6 +97,39 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "StoryAdminVault": {
+      "title": "StoryAdminVault",
+      "description": "Admin-only private vault storing decrypted chapters, description, and lock password for password-protected stories.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "maxLength": 2500,
+          "description": "Unencrypted story synopsis for admin editing."
+        },
+        "chapters": {
+          "type": "array",
+          "description": "Unencrypted chapter list for admin management."
+        },
+        "lockPassword": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Story access password managed by admin."
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Admin UID who last updated the vault."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["description", "chapters", "lockPassword", "updatedBy", "updatedAt"]
     },
     "Category": {
       "title": "Category",
@@ -128,7 +179,13 @@
       "schema": {
         "$ref": "#/entities/Story"
       },
-      "description": "Publicly readable published audio story catalog; writable only by verified admin."
+      "description": "Publicly readable published audio story catalog; locked stories store encrypted payloads; writable only by verified admin."
+    },
+    "/stories/{storyId}/adminVault/{docId}": {
+      "schema": {
+        "$ref": "#/entities/StoryAdminVault"
+      },
+      "description": "Admin-only private vault for password-protected stories."
     },
     "/categories/{categoryId}": {
       "schema": {

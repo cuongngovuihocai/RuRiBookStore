@@ -34,6 +34,7 @@ import {
   createCategoryDoc,
   deleteCategoryDoc,
   deleteStoryDoc,
+  loadStoryAdminVault,
   seedStarterLibrary,
   signOutAdmin,
   subscribeCategories,
@@ -57,6 +58,7 @@ import {
   removeVietnameseTones,
 } from './utils/format';
 import {parseRuRiTTSMessage, type RuRiTTSImportedDraft} from './utils/ruriTtsBridge';
+import type {LockedStorySecret} from './utils/storyLock';
 
 const DEFAULT_PAGE_TITLE = 'Tủ sách Rủ Rỉ Rù Rì — Lưu Trữ & Nghe Truyện Audio Trực Tuyến';
 const LISTENER_STATE_KEY = 'ts_listener_state_v1';
@@ -183,10 +185,13 @@ export default function App() {
     setActiveSection('all');
     if (mode === 'admin') {
       setDetailStoryId(null);
+      setPendingPlayOnUnlockId(null);
       const url = new URL(window.location.href);
       url.searchParams.delete('story');
       window.history.pushState(null, '', `${url.pathname}${url.search}#/admin`);
     } else {
+      setUnlockedMap({});
+      setPendingPlayOnUnlockId(null);
       window.history.pushState(null, '', '/');
     }
   }, []);
@@ -274,10 +279,14 @@ export default function App() {
     }
   }, []);
 
-  // Audio Player State
+  // Audio Player & Per-Session Locked Story Unlock State (memory-only)
   const [currentStoryId, setCurrentStoryId] = useState<string | null>(null);
   const [currentChapterIndex, setCurrentChapterIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [unlockedMap, setUnlockedMap] = useState<
+    Record<string, {secret: LockedStorySecret; payloadKey: string}>
+  >({});
+  const [pendingPlayOnUnlockId, setPendingPlayOnUnlockId] = useState<string | null>(null);
 
   const getListenerState = useCallback(
     (storyId: string): ListenerStoryState => listenerMap[storyId] || DEFAULT_LISTENER_STATE,
@@ -307,9 +316,11 @@ export default function App() {
     let totalChapters = 0;
     let totalDurationSec = 0;
     for (const s of stories) {
-      totalChapters += s.chapters.length;
-      for (const ch of s.chapters) {
-        totalDurationSec += ch.durationSec || 0;
+      totalChapters += s.isLocked ? s.lockedChapterCount ?? s.chapters.length : s.chapters.length;
+      if (!s.isLocked) {
+        for (const ch of s.chapters) {
+          totalDurationSec += ch.durationSec || 0;
+        }
       }
     }
     return {
@@ -397,10 +408,48 @@ export default function App() {
     getListenerState,
   ]);
 
-  const currentStory = useMemo(
-    () => stories.find((s) => s.id === currentStoryId) || null,
-    [stories, currentStoryId]
+  const isStoryUnlocked = useCallback(
+    (story: AudioStory): boolean => {
+      if (!story.isLocked) return true;
+      const entry = unlockedMap[story.id];
+      if (!entry) return false;
+      return entry.payloadKey === (story.lockedPayload || '');
+    },
+    [unlockedMap]
   );
+
+  const resolveEffectiveStory = useCallback(
+    (story: AudioStory): AudioStory => {
+      if (!story.isLocked) return story;
+      const entry = unlockedMap[story.id];
+      if (!entry || entry.payloadKey !== (story.lockedPayload || '')) {
+        return story;
+      }
+      return {
+        ...story,
+        description: entry.secret.description,
+        chapters: entry.secret.chapters,
+      };
+    },
+    [unlockedMap]
+  );
+
+  // Stop playback automatically if the active story gets locked or its password changes
+  useEffect(() => {
+    if (!currentStoryId) return;
+    const raw = stories.find((s) => s.id === currentStoryId);
+    if (raw && raw.isLocked && !isStoryUnlocked(raw)) {
+      setIsPlaying(false);
+      setCurrentStoryId(null);
+    }
+  }, [stories, currentStoryId, isStoryUnlocked]);
+
+  const currentStory = useMemo(() => {
+    const raw = stories.find((s) => s.id === currentStoryId);
+    if (!raw) return null;
+    if (raw.isLocked && !isStoryUnlocked(raw)) return null;
+    return resolveEffectiveStory(raw);
+  }, [stories, currentStoryId, isStoryUnlocked, resolveEffectiveStory]);
 
   const detailStory = useMemo(
     () => stories.find((s) => s.id === detailStoryId) || null,
@@ -449,6 +498,7 @@ export default function App() {
 
   const handleCloseDetail = useCallback(() => {
     setDetailStoryId(null);
+    setPendingPlayOnUnlockId(null);
     syncStoryUrl(currentStoryId, false);
   }, [syncStoryUrl, currentStoryId]);
 
@@ -460,14 +510,82 @@ export default function App() {
     setActiveSection(section);
   };
 
-  const handlePlayStory = (story: AudioStory) => {
+  const handleUnlockSuccess = useCallback(
+    (storyId: string, secret: LockedStorySecret, shouldAutoPlay = false) => {
+      const rawStory = stories.find((s) => s.id === storyId);
+      if (!rawStory) return;
+      setUnlockedMap((prev) => ({
+        ...prev,
+        [storyId]: {
+          secret,
+          payloadKey: rawStory.lockedPayload || '',
+        },
+      }));
+      setPendingPlayOnUnlockId(null);
+
+      if (shouldAutoPlay && secret.chapters.length > 0) {
+        const ls = getListenerState(storyId);
+        const targetIdx = Math.min(
+          ls.lastChapterIndex || 0,
+          Math.max(0, secret.chapters.length - 1)
+        );
+        setCurrentStoryId(storyId);
+        setCurrentChapterIndex(targetIdx);
+        setIsPlaying(true);
+        updateListenerState(storyId, {
+          lastChapterIndex: targetIdx,
+          lastPlayedAt: new Date().toISOString(),
+        });
+      }
+    },
+    [stories, getListenerState, updateListenerState]
+  );
+
+  const handlePlayStory = async (story: AudioStory) => {
+    if (story.isLocked && !isStoryUnlocked(story)) {
+      if (routeMode === 'admin' && isAdminAuthorized) {
+        try {
+          const vault = await loadStoryAdminVault(story.id);
+          if (vault && vault.chapters.length > 0) {
+            setUnlockedMap((prev) => ({
+              ...prev,
+              [story.id]: {
+                secret: {description: vault.description, chapters: vault.chapters},
+                payloadKey: story.lockedPayload || '',
+              },
+            }));
+            const ls = getListenerState(story.id);
+            const targetIdx = Math.min(
+              ls.lastChapterIndex || 0,
+              Math.max(0, vault.chapters.length - 1)
+            );
+            setCurrentStoryId(story.id);
+            setCurrentChapterIndex(targetIdx);
+            setIsPlaying(true);
+            updateListenerState(story.id, {lastPlayedAt: new Date().toISOString()});
+            return;
+          }
+        } catch {
+          // Fallback to opening detail modal
+        }
+      }
+      setPendingPlayOnUnlockId(story.id);
+      handleOpenDetail(story);
+      return;
+    }
+
     if (currentStoryId === story.id) {
       setIsPlaying((prev) => !prev);
       return;
     }
+    const effective = resolveEffectiveStory(story);
     const ls = getListenerState(story.id);
+    const targetIdx = Math.min(
+      ls.lastChapterIndex || 0,
+      Math.max(0, effective.chapters.length - 1)
+    );
     setCurrentStoryId(story.id);
-    setCurrentChapterIndex(ls.lastChapterIndex || 0);
+    setCurrentChapterIndex(targetIdx);
     setIsPlaying(true);
     updateListenerState(story.id, {lastPlayedAt: new Date().toISOString()});
     if (!detailStoryId) {
@@ -476,6 +594,28 @@ export default function App() {
   };
 
   const handlePlayChapter = (story: AudioStory, chapterIdx: number) => {
+    if (story.isLocked && !isStoryUnlocked(story)) {
+      const hasRealAdminChapters =
+        routeMode === 'admin' &&
+        isAdminAuthorized &&
+        story.chapters.length > 0 &&
+        story.chapters[0]?.id !== 'locked-chapter-placeholder';
+
+      if (hasRealAdminChapters) {
+        setUnlockedMap((prev) => ({
+          ...prev,
+          [story.id]: {
+            secret: {description: story.description, chapters: story.chapters},
+            payloadKey: story.lockedPayload || '',
+          },
+        }));
+      } else {
+        setPendingPlayOnUnlockId(story.id);
+        handleOpenDetail(story);
+        return;
+      }
+    }
+
     if (currentStoryId === story.id && currentChapterIndex === chapterIdx) {
       setIsPlaying((prev) => !prev);
       return;
@@ -956,6 +1096,7 @@ export default function App() {
                     story={story}
                     listenerState={getListenerState(story.id)}
                     isAdminView={isAdminView}
+                    isUnlocked={isStoryUnlocked(story)}
                     isCurrentStory={currentStoryId === story.id}
                     isPlaying={isPlaying}
                     onPlayStory={handlePlayStory}
@@ -973,6 +1114,7 @@ export default function App() {
                     story={story}
                     listenerState={getListenerState(story.id)}
                     isAdminView={isAdminView}
+                    isUnlocked={isStoryUnlocked(story)}
                     isCurrentStory={currentStoryId === story.id}
                     isPlaying={isPlaying}
                     onPlayStory={handlePlayStory}
@@ -1066,6 +1208,13 @@ export default function App() {
         }
         isAdminView={isAdminView}
         isAdminAuthorized={isAdminAuthorized}
+        isUnlocked={detailStory ? isStoryUnlocked(detailStory) : false}
+        unlockedSecret={
+          detailStory && isStoryUnlocked(detailStory)
+            ? unlockedMap[detailStory.id]?.secret ?? null
+            : null
+        }
+        autoPlayOnUnlock={Boolean(detailStory && pendingPlayOnUnlockId === detailStory.id)}
         categories={categories}
         currentStoryId={currentStoryId}
         currentChapterIndex={currentChapterIndex}
@@ -1082,6 +1231,7 @@ export default function App() {
           }
         }}
         onSelectKeyword={(kw) => setSelectedKeyword(kw)}
+        onUnlockSuccess={handleUnlockSuccess}
       />
     </div>
   );

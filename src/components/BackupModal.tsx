@@ -1,6 +1,11 @@
 import {CheckCircle2, Cloud, Download, Loader2, Sparkles, Upload, X} from 'lucide-react';
 import {useRef, useState} from 'react';
-import {createCategoryDoc, createStoryDoc, seedStarterLibrary} from '../firebase';
+import {
+  createCategoryDoc,
+  createStoryDoc,
+  loadStoryAdminVault,
+  seedStarterLibrary,
+} from '../firebase';
 import type {AudioChapter, AudioStory, CategoryDoc, LibraryStats} from '../types';
 
 interface BackupModalProps {
@@ -27,30 +32,59 @@ export function BackupModal({
 
   if (!isOpen) return null;
 
-  const handleExportJson = () => {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      categories: categories.map((c) => c.name),
-      stories: stories.map((s) => ({
-        id: s.id,
-        title: s.title,
-        author: s.author,
-        narrator: s.narrator,
-        category: s.category,
-        keywords: s.keywords,
-        description: s.description,
-        coverUrl: s.coverUrl,
-        chapters: s.chapters,
-        isPublished: s.isPublished,
-      })),
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'tu-sach-ru-ri-ru-ri-backup.json';
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleExportJson = async () => {
+    setErrorMsg(null);
+    setStatusMsg(null);
+    setIsBusy(true);
+    try {
+      const exportedStories = await Promise.all(
+        stories.map(async (s) => {
+          let description = s.description;
+          let chapters = s.chapters;
+          let lockPassword: string | undefined;
+
+          if (s.isLocked) {
+            const vault = await loadStoryAdminVault(s.id);
+            if (vault) {
+              description = vault.description;
+              chapters = vault.chapters;
+              lockPassword = vault.lockPassword || undefined;
+            }
+          }
+
+          return {
+            id: s.id,
+            title: s.title,
+            author: s.author,
+            narrator: s.narrator,
+            category: s.category,
+            keywords: s.keywords,
+            description,
+            coverUrl: s.coverUrl,
+            chapters,
+            isPublished: s.isPublished,
+            ...(lockPassword ? {lockPassword} : {}),
+          };
+        })
+      );
+
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        categories: categories.map((c) => c.name),
+        stories: exportedStories,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'tu-sach-ru-ri-ru-ri-backup.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể xuất file sao lưu.');
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -75,6 +109,7 @@ export function BackupModal({
           coverUrl?: string;
           chapters: AudioChapter[];
           isPublished?: boolean;
+          lockPassword?: string;
         }>;
       };
 
@@ -108,6 +143,9 @@ export function BackupModal({
             coverUrl: s.coverUrl || '/src/assets/images/cover_novel_rain_1794949188336.jpg',
             chapters: s.chapters,
             isPublished: s.isPublished !== false,
+            ...(typeof s.lockPassword === 'string' && s.lockPassword.trim()
+              ? {lockPassword: s.lockPassword.trim()}
+              : {}),
           },
           adminUid
         );
@@ -208,10 +246,11 @@ export function BackupModal({
           <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
+              disabled={isBusy}
               onClick={handleExportJson}
-              className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-lg bg-[#7A4B0C] px-4 py-2 text-xs font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+              className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-lg bg-[#7A4B0C] px-4 py-2 text-xs font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
             >
-              <Download className="h-4 w-4" />
+              {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               <span>Tải bản sao lưu (.json)</span>
             </button>
 

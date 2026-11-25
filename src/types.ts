@@ -27,9 +27,19 @@ export interface AudioStory {
   coverUrl: string;
   chapters: AudioChapter[];
   isPublished: boolean;
+  isLocked?: boolean;
+  accessSalt?: string;
+  lockedPayload?: string;
+  lockedChapterCount?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StoryAdminVault {
+  description: string;
+  chapters: AudioChapter[];
+  lockPassword: string;
 }
 
 export interface CategoryDoc {

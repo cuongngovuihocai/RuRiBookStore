@@ -4,9 +4,12 @@ import {
   CheckCircle2,
   CloudUpload,
   Edit3,
+  Eye,
+  EyeOff,
   HelpCircle,
   Link2,
   Loader2,
+  Lock,
   Mic,
   Trash2,
   Upload,
@@ -77,6 +80,9 @@ export function AddStoryModal({
   const [coverUrl, setCoverUrl] = useState(CURATED_COVERS[0].url);
   const [customCoverUrl, setCustomCoverUrl] = useState('');
   const [isPublished, setIsPublished] = useState(true);
+  const [isLocked, setIsLocked] = useState(false);
+  const [lockPassword, setLockPassword] = useState('');
+  const [showLockPassword, setShowLockPassword] = useState(false);
 
   const [chapters, setChapters] = useState<AudioChapter[]>([]);
   const [audioInputMode, setAudioInputMode] = useState<AudioInputMode>('supabase');
@@ -200,6 +206,9 @@ export function AddStoryModal({
     setCoverUrl(CURATED_COVERS[0].url);
     setCustomCoverUrl('');
     setIsPublished(true);
+    setIsLocked(false);
+    setLockPassword('');
+    setShowLockPassword(false);
     setChapters([]);
     setPendingFiles([]);
     setEditingChapterId(null);
@@ -457,6 +466,10 @@ export function AddStoryModal({
       setErrorMsg('Vui lòng thêm ít nhất 1 chương audio (tải file lên Supabase hoặc dán link).');
       return;
     }
+    if (isLocked && !lockPassword.trim()) {
+      setErrorMsg('Vui lòng nhập mật khẩu để khoá truyện.');
+      return;
+    }
 
     const finalCategory =
       category === '__custom__' ? customCategory.trim() || 'Truyện ngắn' : category;
@@ -489,6 +502,7 @@ export function AddStoryModal({
           coverUrl: finalCover,
           chapters,
           isPublished,
+          lockPassword: isLocked ? lockPassword.trim() : undefined,
         },
         adminUid
       );
@@ -1163,6 +1177,50 @@ export function AddStoryModal({
               >
                 Công khai ngay cho người nghe ở trang chủ (bỏ tick để lưu dưới dạng Nháp)
               </label>
+            </div>
+
+            <div className="space-y-2.5 rounded-xl border border-[#DEC999] bg-[#F7ECCE]/60 p-3.5 sm:col-span-2 dark:border-[#302B4F] dark:bg-[#19162D]/80">
+              <div className="flex items-center gap-2.5">
+                <input
+                  id="lock-story-toggle"
+                  type="checkbox"
+                  checked={isLocked}
+                  onChange={(e) => setIsLocked(e.target.checked)}
+                  className="h-4 w-4 rounded border-[#D3BC87] text-[#7A4B0C] focus:ring-[#7A4B0C] dark:border-[#37315A] dark:text-[#6A58C8]"
+                />
+                <label
+                  htmlFor="lock-story-toggle"
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2B2111] dark:text-[#F1ECF8]"
+                >
+                  <Lock className="h-3.5 w-3.5 text-[#7A4B0C] dark:text-[#D5B263]" />
+                  <span>Khoá truyện bằng mật khẩu riêng</span>
+                </label>
+              </div>
+              {isLocked && (
+                <div className="space-y-1.5 pl-6">
+                  <div className="relative flex items-center">
+                    <input
+                      type={showLockPassword ? 'text' : 'password'}
+                      maxLength={100}
+                      value={lockPassword}
+                      onChange={(e) => setLockPassword(e.target.value)}
+                      placeholder="Nhập mật khẩu để mở xem & nghe truyện này..."
+                      className="w-full rounded-lg border border-[#D3BC87] bg-[#FFFDF6] py-2 pr-9 pl-3 text-sm text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowLockPassword((v) => !v)}
+                      className="absolute right-2 rounded p-1 text-[#6D5937] hover:bg-[#EFE0BA] dark:text-[#ACA4CA] dark:hover:bg-[#2D284D]"
+                      aria-label={showLockPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                    >
+                      {showLockPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-[#6D5937] dark:text-[#9E94C0]">
+                    Nội dung giới thiệu và danh sách chương sẽ được mã hoá. Bất kỳ người dùng nào cũng phải nhập đúng mật khẩu này mới xem và nghe được.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 

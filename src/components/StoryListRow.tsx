@@ -1,4 +1,4 @@
-import {BookOpen, Check, Heart, Pause, Play, Share2} from 'lucide-react';
+import {BookOpen, Check, Heart, Lock, LockOpen, Pause, Play, Share2} from 'lucide-react';
 import {useEffect, useState} from 'react';
 import type {AudioStory, ListenerStoryState} from '../types';
 import {buildStoryShareUrl, copyTextToClipboard, formatDuration} from '../utils/format';
@@ -8,6 +8,7 @@ interface StoryListRowProps {
   story: AudioStory;
   listenerState: ListenerStoryState;
   isAdminView: boolean;
+  isUnlocked?: boolean;
   isCurrentStory: boolean;
   isPlaying: boolean;
   onPlayStory: (story: AudioStory) => void;
@@ -20,6 +21,7 @@ export function StoryListRow({
   story,
   listenerState,
   isAdminView,
+  isUnlocked = false,
   isCurrentStory,
   isPlaying,
   onPlayStory,
@@ -41,7 +43,15 @@ export function StoryListRow({
       window.setTimeout(() => setCopiedLink(false), 2000);
     }
   };
-  const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
+
+  const requiresUnlock = Boolean(story.isLocked && !isUnlocked);
+  const displayChapterCount =
+    story.isLocked && !isUnlocked
+      ? story.lockedChapterCount || story.chapters.length
+      : story.chapters.length;
+  const totalDuration = requiresUnlock
+    ? 0
+    : story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
 
   return (
     <div
@@ -72,7 +82,7 @@ export function StoryListRow({
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#6D5937] dark:text-[#ACA4CA]">
             <span className="font-medium text-[#7A4B0C] dark:text-[#D5B263]">{story.category}</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono-tabular">{story.chapters.length} chương</span>
+            <span className="font-mono-tabular">{displayChapterCount} chương</span>
             {totalDuration > 0 && (
               <>
                 <span aria-hidden="true">·</span>
@@ -125,6 +135,22 @@ export function StoryListRow({
       </div>
 
       <div className="flex items-center justify-end gap-2 shrink-0">
+        {story.isLocked && (
+          <button
+            type="button"
+            onClick={() => onOpenDetail(story)}
+            aria-label={requiresUnlock ? 'Truyện có mật khẩu' : 'Truyện đã mở khoá'}
+            title={requiresUnlock ? 'Truyện có mật khẩu' : 'Đã mở khoá'}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[#DEC999] text-[#5C492B] hover:bg-[#F3E5BF] dark:border-[#37315A] dark:text-[#D6CFF0] dark:hover:bg-[#292447]"
+          >
+            {requiresUnlock ? (
+              <Lock className="h-4 w-4 text-amber-700 dark:text-amber-300" />
+            ) : (
+              <LockOpen className="h-4 w-4 text-emerald-700 dark:text-emerald-400" />
+            )}
+          </button>
+        )}
+
         <button
           type="button"
           onClick={handleShare}
@@ -163,7 +189,12 @@ export function StoryListRow({
           onClick={() => onPlayStory(story)}
           className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-[#7A4B0C] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#5E3807] whitespace-nowrap dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
         >
-          {isCurrentStory && isPlaying ? (
+          {requiresUnlock ? (
+            <>
+              <Lock className="h-3.5 w-3.5" />
+              <span>Mở khoá</span>
+            </>
+          ) : isCurrentStory && isPlaying ? (
             <>
               <Pause className="h-3.5 w-3.5 fill-current" />
               <span>Tạm dừng</span>

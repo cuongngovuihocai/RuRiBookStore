@@ -4,8 +4,11 @@ import {
   Eye,
   EyeOff,
   Heart,
+  KeyRound,
   Link2,
   Loader2,
+  Lock,
+  LockOpen,
   Pause,
   Play,
   Plus,
@@ -15,7 +18,14 @@ import {
   X,
 } from 'lucide-react';
 import {useEffect, useRef, useState} from 'react';
-import type {AudioChapter, AudioStory, CategoryDoc, ListenerStoryState} from '../types';
+import {loadStoryAdminVault, type UpdateStoryPatch} from '../firebase';
+import type {
+  AudioChapter,
+  AudioStory,
+  CategoryDoc,
+  ListenerStoryState,
+  StoryAdminVault,
+} from '../types';
 import {
   buildStoryShareUrl,
   copyTextToClipboard,
@@ -28,6 +38,7 @@ import {
   optimizeCoverImageFile,
   resolvePlayableAudioUrl,
 } from '../utils/format';
+import {decryptStorySecret, type LockedStorySecret} from '../utils/storyLock';
 import {checkSupabaseStorageStatus, uploadCoverToSupabase} from '../utils/supabaseUpload';
 import {CoverImage} from './CoverImage';
 
@@ -36,6 +47,9 @@ interface StoryDetailModalProps {
   listenerState: ListenerStoryState;
   isAdminView: boolean;
   isAdminAuthorized: boolean;
+  isUnlocked?: boolean;
+  unlockedSecret?: LockedStorySecret | null;
+  autoPlayOnUnlock?: boolean;
   categories: CategoryDoc[];
   currentStoryId: string | null;
   currentChapterIndex: number;
@@ -43,9 +57,14 @@ interface StoryDetailModalProps {
   onClose: () => void;
   onPlayChapter: (story: AudioStory, chapterIndex: number) => void;
   onToggleFavorite: (story: AudioStory) => void;
-  onUpdateStory: (id: string, patch: Partial<AudioStory>) => Promise<void>;
+  onUpdateStory: (id: string, patch: UpdateStoryPatch) => Promise<void>;
   onDeleteStory: (id: string) => Promise<void>;
   onSelectKeyword: (kw: string) => void;
+  onUnlockSuccess?: (
+    storyId: string,
+    secret: LockedStorySecret,
+    shouldAutoPlay?: boolean
+  ) => void;
 }
 
 export function StoryDetailModal({
@@ -53,6 +72,9 @@ export function StoryDetailModal({
   listenerState,
   isAdminView,
   isAdminAuthorized,
+  isUnlocked = false,
+  unlockedSecret = null,
+  autoPlayOnUnlock = false,
   categories,
   currentStoryId,
   currentChapterIndex,
@@ -63,6 +85,7 @@ export function StoryDetailModal({
   onUpdateStory,
   onDeleteStory,
   onSelectKeyword,
+  onUnlockSuccess,
 }: StoryDetailModalProps) {
   const canManage = isAdminView && isAdminAuthorized;
 
@@ -74,6 +97,17 @@ export function StoryDetailModal({
   const [editKeywords, setEditKeywords] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editCoverUrl, setEditCoverUrl] = useState('');
+  const [editIsLocked, setEditIsLocked] = useState(false);
+  const [editLockPassword, setEditLockPassword] = useState('');
+  const [showEditLockPassword, setShowEditLockPassword] = useState(false);
+
+  const [adminVault, setAdminVault] = useState<StoryAdminVault | null>(null);
+  const [isLoadingVault, setIsLoadingVault] = useState(false);
+
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [showUnlockPassword, setShowUnlockPassword] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isAddingLink, setIsAddingLink] = useState(false);
@@ -91,7 +125,46 @@ export function StoryDetailModal({
 
   useEffect(() => {
     setCopiedLink(false);
+    setIsEditing(false);
+    setConfirmDelete(false);
+    setIsAddingLink(false);
+    setEditingChapterId(null);
+    setStatusError(null);
+    setUnlockPassword('');
+    setShowUnlockPassword(false);
+    setUnlockError(null);
   }, [story?.id]);
+
+  useEffect(() => {
+    if (!story?.id || !canManage || !story.isLocked) {
+      setAdminVault(null);
+      setIsLoadingVault(false);
+      return;
+    }
+
+    let active = true;
+    setIsLoadingVault(true);
+    loadStoryAdminVault(story.id)
+      .then((vault) => {
+        if (active) setAdminVault(vault);
+      })
+      .catch((err) => {
+        if (active) {
+          setStatusError(
+            err instanceof Error
+              ? err.message
+              : 'Không thể tải dữ liệu bảo mật của truyện.'
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingVault(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [story?.id, story?.isLocked, story?.updatedAt, canManage]);
 
   useEffect(() => {
     if (!canManage || !isEditing) return;
@@ -106,11 +179,68 @@ export function StoryDetailModal({
 
   if (!story) return null;
 
+  const isLocked = Boolean(story.isLocked);
+  const hasAccess = canManage || !isLocked || isUnlocked;
+
+  const effectiveDescription = isLocked
+    ? canManage
+      ? adminVault?.description ?? ''
+      : isUnlocked && unlockedSecret
+        ? unlockedSecret.description
+        : ''
+    : story.description;
+
+  const effectiveChapters = isLocked
+    ? canManage
+      ? adminVault?.chapters ?? []
+      : isUnlocked && unlockedSecret
+        ? unlockedSecret.chapters
+        : []
+    : story.chapters;
+
+  const effectiveStory: AudioStory = {
+    ...story,
+    description: effectiveDescription,
+    chapters: effectiveChapters,
+  };
+
+  const displayChapterCount =
+    isLocked && !hasAccess ? story.lockedChapterCount ?? 1 : effectiveChapters.length;
+
+  const totalDuration = hasAccess
+    ? effectiveChapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0)
+    : 0;
+
   const handleShareStory = async () => {
     const ok = await copyTextToClipboard(buildStoryShareUrl(story.id));
     if (ok) {
       setCopiedLink(true);
       window.setTimeout(() => setCopiedLink(false), 2500);
+    }
+  };
+
+  const handleUnlockSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!unlockPassword.trim()) {
+      setUnlockError('Vui lòng nhập mật khẩu để mở khoá truyện.');
+      return;
+    }
+    setIsUnlocking(true);
+    setUnlockError(null);
+    try {
+      const secret = await decryptStorySecret(
+        story.lockedPayload || '',
+        story.accessSalt || '',
+        unlockPassword
+      );
+      setUnlockPassword('');
+      onUnlockSuccess?.(story.id, secret, autoPlayOnUnlock);
+    } catch (err) {
+      setUnlockError(
+        err instanceof Error ? err.message : 'Mật khẩu không đúng, vui lòng thử lại.'
+      );
+    } finally {
+      setIsUnlocking(false);
     }
   };
 
@@ -120,17 +250,27 @@ export function StoryDetailModal({
     setEditNarrator(story.narrator);
     setEditCategory(story.category);
     setEditKeywords(story.keywords.join(', '));
-    setEditDesc(story.description);
+    setEditDesc(effectiveDescription);
     setEditCoverUrl(story.coverUrl);
+    setEditIsLocked(Boolean(story.isLocked));
+    setEditLockPassword(adminVault?.lockPassword || '');
+    setShowEditLockPassword(false);
     setIsEditing(true);
     setConfirmDelete(false);
+    setStatusError(null);
   };
 
   const saveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editIsLocked && !editLockPassword.trim()) {
+      setStatusError('Vui lòng nhập mật khẩu để khoá truyện.');
+      return;
+    }
     setIsBusy(true);
     setStatusError(null);
     try {
+      const cleanDesc = editDesc.trim();
+      const cleanPass = editLockPassword.trim();
       await onUpdateStory(story.id, {
         title: editTitle.trim() || story.title,
         author: editAuthor.trim(),
@@ -140,9 +280,22 @@ export function StoryDetailModal({
           .split(',')
           .map((k) => k.trim())
           .filter(Boolean),
-        description: editDesc.trim(),
+        description: cleanDesc,
         coverUrl: normalizeCoverImageUrl(editCoverUrl.trim()) || story.coverUrl,
+        lockConfig: {
+          enabled: editIsLocked,
+          password: editIsLocked ? cleanPass : undefined,
+        },
       });
+      if (editIsLocked) {
+        setAdminVault({
+          description: cleanDesc,
+          chapters: effectiveChapters,
+          lockPassword: cleanPass,
+        });
+      } else {
+        setAdminVault(null);
+      }
       setIsEditing(false);
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : 'Không thể cập nhật thông tin.');
@@ -176,16 +329,20 @@ export function StoryDetailModal({
 
       const newChapter: AudioChapter = {
         id: `ch-${crypto.randomUUID()}`,
-        title: newChTitle.trim() || `Chương ${story.chapters.length + 1}`,
+        title: newChTitle.trim() || `Chương ${effectiveChapters.length + 1}`,
         sourceType: trimmed.startsWith('/samples/') ? 'sample' : 'url',
         audioUrl: norm.playableUrl,
         originalUrl: norm.originalUrl || trimmed,
         durationSec: check.durationSec,
       };
 
+      const nextChapters = [...effectiveChapters, newChapter];
       await onUpdateStory(story.id, {
-        chapters: [...story.chapters, newChapter],
+        chapters: nextChapters,
       });
+      if (isLocked && adminVault) {
+        setAdminVault({...adminVault, chapters: nextChapters});
+      }
       setNewChTitle('');
       setNewChUrl('');
       setIsAddingLink(false);
@@ -197,13 +354,17 @@ export function StoryDetailModal({
   };
 
   const handleRemoveChapter = async (chapterId: string) => {
-    if (story.chapters.length <= 1) {
+    if (effectiveChapters.length <= 1) {
       setStatusError('Truyện cần giữ lại ít nhất 1 chương.');
       return;
     }
+    const nextChapters = effectiveChapters.filter((c) => c.id !== chapterId);
     await onUpdateStory(story.id, {
-      chapters: story.chapters.filter((c) => c.id !== chapterId),
+      chapters: nextChapters,
     });
+    if (isLocked && adminVault) {
+      setAdminVault({...adminVault, chapters: nextChapters});
+    }
   };
 
   const startEditChapter = (ch: AudioChapter) => {
@@ -247,7 +408,7 @@ export function StoryDetailModal({
         }
       }
 
-      const updatedChapters = story.chapters.map((c) =>
+      const updatedChapters = effectiveChapters.map((c) =>
         c.id === originalChapter.id
           ? {
               ...c,
@@ -261,6 +422,9 @@ export function StoryDetailModal({
       );
 
       await onUpdateStory(story.id, {chapters: updatedChapters});
+      if (isLocked && adminVault) {
+        setAdminVault({...adminVault, chapters: updatedChapters});
+      }
       setEditingChapterId(null);
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : 'Không thể cập nhật link chương.');
@@ -268,8 +432,6 @@ export function StoryDetailModal({
       setIsBusy(false);
     }
   };
-
-  const totalDuration = story.chapters.reduce((acc, ch) => acc + (ch.durationSec || 0), 0);
 
   return (
     <div
@@ -285,13 +447,26 @@ export function StoryDetailModal({
 
       <div className="relative z-10 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[#DEC999] bg-[#FDF8EB] shadow-2xl dark:border-[#302B4F] dark:bg-[#1E1B33]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#DEC999] px-6 py-4 dark:border-[#2E294D]">
+        <div className="flex items-center justify-between gap-2 border-b border-[#DEC999] px-6 py-4 dark:border-[#2E294D]">
           <span className="text-xs font-medium text-[#6D5937] dark:text-[#ACA4CA]">
-            {story.category} · {story.chapters.length} chương
+            {story.category} · {displayChapterCount} chương
             {totalDuration > 0 ? ` · ${formatDuration(totalDuration)}` : ''}
             {canManage && !story.isPublished ? ' · Bản nháp' : ''}
           </span>
           <div className="flex items-center gap-1.5">
+            {isLocked && (
+              <span
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-[#5C492B] dark:text-[#ACA4CA]"
+                title={canManage ? 'Truyện đang khoá mật khẩu' : isUnlocked ? 'Đã mở khoá' : 'Truyện có mật khẩu'}
+                aria-label={canManage ? 'Truyện đang khoá mật khẩu' : isUnlocked ? 'Đã mở khoá' : 'Truyện có mật khẩu'}
+              >
+                {hasAccess ? (
+                  <LockOpen className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <Lock className="h-4 w-4 text-amber-700 dark:text-amber-300" />
+                )}
+              </span>
+            )}
             <button
               type="button"
               onClick={handleShareStory}
@@ -348,8 +523,9 @@ export function StoryDetailModal({
                 </button>
                 <button
                   type="button"
+                  disabled={isLoadingVault && !isEditing}
                   onClick={() => (isEditing ? setIsEditing(false) : startEdit())}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] disabled:opacity-50 dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
                 >
                   <Edit3 className="h-3.5 w-3.5" />
                   <span>{isEditing ? 'Huỷ sửa' : 'Sửa thông tin'}</span>
@@ -530,6 +706,54 @@ export function StoryDetailModal({
                     className="w-full rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-2 text-sm text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:focus:border-[#8B7AE0]"
                   />
                 </div>
+
+                {/* Story Password Lock Section */}
+                <div className="sm:col-span-2 rounded-xl border border-[#DEC999] bg-[#F7ECCE]/60 p-3.5 dark:border-[#37315A] dark:bg-[#19162D]">
+                  <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#2B2111] dark:text-[#F4EFFB]">
+                    <input
+                      type="checkbox"
+                      checked={editIsLocked}
+                      onChange={(e) => setEditIsLocked(e.target.checked)}
+                      className="h-4 w-4 accent-[#7A4B0C] dark:accent-[#6A58C8]"
+                    />
+                    <Lock className="h-3.5 w-3.5 text-[#7A4B0C] dark:text-[#D5B263]" />
+                    <span>Khoá truyện bằng mật khẩu riêng</span>
+                  </label>
+                  <p className="mt-1 text-[11px] text-[#5C492B] dark:text-[#ACA4CA]">
+                    Bất kỳ người nghe nào (kể cả khi mở link chia sẻ trực tiếp) đều phải nhập đúng mật khẩu mới xem được mô tả, danh sách chương và phát audio.
+                  </p>
+
+                  {editIsLocked && (
+                    <div className="mt-2.5">
+                      <label className="mb-1 block text-xs font-medium text-[#4B3B21] dark:text-[#DCD6F0]">
+                        Mật khẩu mở truyện *
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showEditLockPassword ? 'text' : 'password'}
+                          required={editIsLocked}
+                          maxLength={100}
+                          value={editLockPassword}
+                          onChange={(e) => setEditLockPassword(e.target.value)}
+                          placeholder="Nhập mật khẩu bảo vệ truyện..."
+                          className="w-full rounded-lg border border-[#D3BC87] bg-[#FFFDF6] py-2 pr-10 pl-3 text-sm text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:focus:border-[#8B7AE0]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowEditLockPassword((v) => !v)}
+                          className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded p-1 text-[#6D5937] hover:text-[#2B2111] dark:text-[#9E94C0] dark:hover:text-[#F1ECF8]"
+                          aria-label={showEditLockPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                        >
+                          {showEditLockPassword ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="flex justify-end gap-2">
                 <button
@@ -542,9 +766,13 @@ export function StoryDetailModal({
                 <button
                   type="submit"
                   disabled={isBusy}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#7A4B0C] px-4 py-2 text-xs font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#7A4B0C] px-4 py-2 text-xs font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  {isBusy ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Check className="h-3.5 w-3.5" />
+                  )}
                   <span>Lưu thay đổi</span>
                 </button>
               </div>
@@ -575,219 +803,319 @@ export function StoryDetailModal({
                     {story.narrator}
                   </span>
                 </p>
-                {story.description && (
-                  <p className="text-sm leading-relaxed text-[#4B3B21] dark:text-[#CFC8E6]">
-                    {story.description}
+
+                {hasAccess ? (
+                  <>
+                    {canManage && isLocked && isLoadingVault ? (
+                      <div className="inline-flex items-center gap-2 text-xs text-[#6D5937] dark:text-[#9E94C0]">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Đang tải nội dung bảo mật...</span>
+                      </div>
+                    ) : (
+                      effectiveDescription && (
+                        <p className="text-sm leading-relaxed text-[#4B3B21] dark:text-[#CFC8E6]">
+                          {effectiveDescription}
+                        </p>
+                      )
+                    )}
+                    {story.keywords.length > 0 && (
+                      <div className="flex flex-wrap gap-2.5 pt-1 text-xs text-[#6D5937] dark:text-[#9E94C0]">
+                        {story.keywords.map((kw) => (
+                          <button
+                            key={kw}
+                            type="button"
+                            onClick={() => {
+                              onSelectKeyword(kw);
+                              onClose();
+                            }}
+                            className="hover:text-[#7A4B0C] hover:underline dark:hover:text-[#D5B263]"
+                          >
+                            #{kw}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {effectiveChapters.length > 0 && (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onPlayChapter(
+                              effectiveStory,
+                              Math.min(
+                                listenerState.lastChapterIndex || 0,
+                                Math.max(0, effectiveChapters.length - 1)
+                              )
+                            )
+                          }
+                          className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#7A4B0C] px-4 py-2 text-sm font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                        >
+                          <Play className="h-4 w-4 fill-current" />
+                          <span>
+                            {listenerState.lastPositionSec > 5 ? 'Nghe tiếp vị trí đang dở' : 'Phát từ đầu'}
+                          </span>
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-[#5C492B] dark:text-[#ACA4CA]">
+                    Nội dung giới thiệu và danh sách {displayChapterCount} chương đang được ẩn sau mật khẩu.
                   </p>
                 )}
-                {story.keywords.length > 0 && (
-                  <div className="flex flex-wrap gap-2.5 pt-1 text-xs text-[#6D5937] dark:text-[#9E94C0]">
-                    {story.keywords.map((kw) => (
-                      <button
-                        key={kw}
-                        type="button"
-                        onClick={() => {
-                          onSelectKeyword(kw);
-                          onClose();
-                        }}
-                        className="hover:text-[#7A4B0C] hover:underline dark:hover:text-[#D5B263]"
-                      >
-                        #{kw}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => onPlayChapter(story, listenerState.lastChapterIndex || 0)}
-                    className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-[#7A4B0C] px-4 py-2 text-sm font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
-                  >
-                    <Play className="h-4 w-4 fill-current" />
-                    <span>
-                      {listenerState.lastPositionSec > 5 ? 'Nghe tiếp vị trí đang dở' : 'Phát từ đầu'}
-                    </span>
-                  </button>
-                </div>
               </div>
             </div>
           )}
 
-          {/* Chapters List */}
-          <div className="border-t border-[#DEC999] pt-5 dark:border-[#2E294D]">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-[#2B2111] dark:text-[#F4EFFB]">
-                Danh sách chương ({story.chapters.length})
-              </h3>
-              {canManage && (
-                <button
-                  type="button"
-                  onClick={() => setIsAddingLink((v) => !v)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D3BC87] px-2.5 py-1.5 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:border-[#37315A] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  <span>Thêm link chương</span>
-                </button>
-              )}
-            </div>
+          {/* Unlock Gate OR Chapters List */}
+          {!hasAccess ? (
+            <form
+              onSubmit={handleUnlockSubmit}
+              className="space-y-4 rounded-2xl border border-[#DEC999] bg-[#F7ECCE]/75 p-5 dark:border-[#37315A] dark:bg-[#19162D]"
+            >
+              <div className="flex items-start gap-3">
+                <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EFE0BA] text-[#7A4B0C] dark:bg-[#292447] dark:text-[#D5B263]">
+                  <KeyRound className="h-5 w-5" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-semibold text-[#2B2111] dark:text-[#F4EFFB]">
+                    Truyện này được bảo vệ bằng mật khẩu
+                  </h3>
+                  <p className="mt-0.5 text-xs leading-relaxed text-[#5C492B] dark:text-[#ACA4CA]">
+                    Vui lòng nhập mật khẩu do quản trị viên cung cấp để mở khoá phần mô tả, danh sách chương và nghe audio.
+                  </p>
+                </div>
+              </div>
 
-            {canManage && isAddingLink && (
-              <form
-                onSubmit={handleAddLinkChapter}
-                className="mb-3 flex flex-col gap-2 rounded-xl border border-[#DEC999] bg-[#F7ECCE]/70 p-3 sm:flex-row dark:border-[#302B4F] dark:bg-[#19162D]"
-              >
-                <input
-                  type="text"
-                  value={newChTitle}
-                  onChange={(e) => setNewChTitle(e.target.value)}
-                  placeholder="Tên chương..."
-                  className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-40 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
-                />
-                <input
-                  type="text"
-                  required
-                  value={newChUrl}
-                  onChange={(e) => setNewChUrl(e.target.value)}
-                  placeholder="Link audio hoặc ID Google Drive sau /d/..."
-                  className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
-                />
+              {unlockError && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/40 dark:text-rose-200">
+                  {unlockError}
+                </div>
+              )}
+
+              <div className="flex flex-col gap-2.5 sm:flex-row">
+                <div className="relative flex-1">
+                  <input
+                    type={showUnlockPassword ? 'text' : 'password'}
+                    autoFocus
+                    required
+                    value={unlockPassword}
+                    onChange={(e) => setUnlockPassword(e.target.value)}
+                    placeholder="Nhập mật khẩu mở khoá..."
+                    className="h-11 w-full rounded-xl border border-[#D3BC87] bg-[#FFFDF6] pr-10 pl-3.5 text-sm text-[#2B2111] placeholder:text-[#8A7553] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8] dark:placeholder:text-[#8E84B2] dark:focus:border-[#8B7AE0]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowUnlockPassword((v) => !v)}
+                    className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded p-1 text-[#6D5937] hover:text-[#2B2111] dark:text-[#9E94C0] dark:hover:text-[#F1ECF8]"
+                    aria-label={showUnlockPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                  >
+                    {showUnlockPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+
                 <button
                   type="submit"
-                  disabled={isBusy}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#7A4B0C] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                  disabled={isUnlocking}
+                  className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#7A4B0C] px-5 text-sm font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
                 >
-                  {isBusy ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {isUnlocking ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Link2 className="h-3.5 w-3.5" />
+                    <LockOpen className="h-4 w-4" />
                   )}
-                  <span>Thêm</span>
+                  <span>{autoPlayOnUnlock ? 'Mở khoá & Nghe ngay' : 'Mở khoá truyện'}</span>
                 </button>
-              </form>
-            )}
-
-            <div className="divide-y divide-[#ECDCB4] rounded-xl border border-[#DEC999] bg-[#FFFDF6]/70 dark:divide-[#2E294D] dark:border-[#302B4F] dark:bg-[#19162D]/60">
-              {story.chapters.map((ch, idx) => {
-                const isActiveChapter = currentStoryId === story.id && currentChapterIndex === idx;
-                const isEditingThis = canManage && editingChapterId === ch.id;
-
-                if (isEditingThis) {
-                  return (
-                    <form
-                      key={ch.id}
-                      onSubmit={(e) => handleSaveEditChapter(e, ch)}
-                      className="space-y-2 bg-[#F7ECCE]/60 px-4 py-3 dark:bg-[#231F3D]/80"
-                    >
-                      <div className="flex flex-col gap-2 sm:flex-row">
-                        <input
-                          type="text"
-                          required
-                          value={editChTitle}
-                          onChange={(e) => setEditChTitle(e.target.value)}
-                          placeholder="Tên chương..."
-                          className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-48 dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
-                        />
-                        <input
-                          type="text"
-                          required
-                          value={editChUrl}
-                          onChange={(e) => setEditChUrl(e.target.value)}
-                          placeholder="Link audio hoặc ID Google Drive sau /d/..."
-                          className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
-                        />
-                      </div>
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => setEditingChapterId(null)}
-                          className="rounded-lg border border-[#D3BC87] px-2.5 py-1 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:border-[#37315A] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
-                        >
-                          Huỷ
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={isBusy}
-                          className="inline-flex items-center gap-1 rounded-lg bg-[#7A4B0C] px-3 py-1 text-xs font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
-                        >
-                          {isBusy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Check className="h-3.5 w-3.5" />
-                          )}
-                          <span>Lưu chương</span>
-                        </button>
-                      </div>
-                    </form>
-                  );
-                }
-
-                return (
-                  <div
-                    key={ch.id}
-                    className={`flex items-center justify-between gap-3 px-4 py-3 ${
-                      isActiveChapter ? 'bg-[#EFE0BA]/75 dark:bg-[#292447]/80' : ''
-                    }`}
+              </div>
+            </form>
+          ) : (
+            <div className="border-t border-[#DEC999] pt-5 dark:border-[#2E294D]">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-[#2B2111] dark:text-[#F4EFFB]">
+                  Danh sách chương ({effectiveChapters.length})
+                </h3>
+                {canManage && (
+                  <button
+                    type="button"
+                    disabled={isLoadingVault}
+                    onClick={() => setIsAddingLink((v) => !v)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#D3BC87] px-2.5 py-1.5 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] disabled:opacity-50 dark:border-[#37315A] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
                   >
-                    <button
-                      type="button"
-                      onClick={() => onPlayChapter(story, idx)}
-                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                    >
-                      <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EFE0BA] text-[#3B2E17] dark:bg-[#292447] dark:text-[#E5DEF9]">
-                        {isActiveChapter && isPlaying ? (
-                          <Pause className="h-3.5 w-3.5 fill-current text-[#7A4B0C] dark:text-[#D5B263]" />
-                        ) : (
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                        )}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className={`truncate text-sm font-medium ${
-                            isActiveChapter
-                              ? 'text-[#7A4B0C] dark:text-[#D5B263]'
-                              : 'text-[#2B2111] dark:text-[#F1ECF8]'
-                          }`}
-                        >
-                          {ch.title}
-                        </p>
-                        {ch.durationSec > 0 && (
-                          <p className="font-mono-tabular text-xs text-[#6D5937] dark:text-[#9E94C0]">
-                            {formatDuration(ch.durationSec)}
-                          </p>
-                        )}
-                      </div>
-                    </button>
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Thêm link chương</span>
+                  </button>
+                )}
+              </div>
 
-                    {canManage && (
-                      <div className="flex shrink-0 items-center gap-1">
+              {canManage && isAddingLink && (
+                <form
+                  onSubmit={handleAddLinkChapter}
+                  className="mb-3 flex flex-col gap-2 rounded-xl border border-[#DEC999] bg-[#F7ECCE]/70 p-3 sm:flex-row dark:border-[#302B4F] dark:bg-[#19162D]"
+                >
+                  <input
+                    type="text"
+                    value={newChTitle}
+                    onChange={(e) => setNewChTitle(e.target.value)}
+                    placeholder="Tên chương..."
+                    className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-40 dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
+                  />
+                  <input
+                    type="text"
+                    required
+                    value={newChUrl}
+                    onChange={(e) => setNewChUrl(e.target.value)}
+                    placeholder="Link audio hoặc ID Google Drive sau /d/..."
+                    className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#231F3D] dark:text-[#F1ECF8]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isBusy}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#7A4B0C] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5E3807] dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                  >
+                    {isBusy ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Link2 className="h-3.5 w-3.5" />
+                    )}
+                    <span>Thêm</span>
+                  </button>
+                </form>
+              )}
+
+              {canManage && isLocked && isLoadingVault ? (
+                <div className="flex items-center justify-center gap-2 rounded-xl border border-[#DEC999] bg-[#FFFDF6]/70 px-4 py-8 text-xs text-[#6D5937] dark:border-[#302B4F] dark:bg-[#19162D]/60 dark:text-[#9E94C0]">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Đang tải danh sách chương...</span>
+                </div>
+              ) : (
+                <div className="divide-y divide-[#ECDCB4] rounded-xl border border-[#DEC999] bg-[#FFFDF6]/70 dark:divide-[#2E294D] dark:border-[#302B4F] dark:bg-[#19162D]/60">
+                  {effectiveChapters.map((ch, idx) => {
+                    const isActiveChapter = currentStoryId === story.id && currentChapterIndex === idx;
+                    const isEditingThis = canManage && editingChapterId === ch.id;
+
+                    if (isEditingThis) {
+                      return (
+                        <form
+                          key={ch.id}
+                          onSubmit={(e) => handleSaveEditChapter(e, ch)}
+                          className="space-y-2 bg-[#F7ECCE]/60 px-4 py-3 dark:bg-[#231F3D]/80"
+                        >
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <input
+                              type="text"
+                              required
+                              value={editChTitle}
+                              onChange={(e) => setEditChTitle(e.target.value)}
+                              placeholder="Tên chương..."
+                              className="rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none sm:w-48 dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
+                            />
+                            <input
+                              type="text"
+                              required
+                              value={editChUrl}
+                              onChange={(e) => setEditChUrl(e.target.value)}
+                              placeholder="Link audio hoặc ID Google Drive sau /d/..."
+                              className="flex-1 rounded-lg border border-[#D3BC87] bg-[#FFFDF6] px-3 py-1.5 text-xs text-[#2B2111] focus:border-[#7A4B0C] focus:outline-none dark:border-[#37315A] dark:bg-[#19162D] dark:text-[#F1ECF8]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => setEditingChapterId(null)}
+                              className="rounded-lg border border-[#D3BC87] px-2.5 py-1 text-xs font-medium text-[#4B3B21] hover:bg-[#EFE0BA] dark:border-[#37315A] dark:text-[#DCD6F0] dark:hover:bg-[#292447]"
+                            >
+                              Huỷ
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={isBusy}
+                              className="inline-flex items-center gap-1 rounded-lg bg-[#7A4B0C] px-3 py-1 text-xs font-medium text-white hover:bg-[#5E3807] disabled:opacity-60 dark:bg-[#6A58C8] dark:hover:bg-[#5947B5]"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Check className="h-3.5 w-3.5" />
+                              )}
+                              <span>Lưu chương</span>
+                            </button>
+                          </div>
+                        </form>
+                      );
+                    }
+
+                    return (
+                      <div
+                        key={ch.id}
+                        className={`flex items-center justify-between gap-3 px-4 py-3 ${
+                          isActiveChapter ? 'bg-[#EFE0BA]/75 dark:bg-[#292447]/80' : ''
+                        }`}
+                      >
                         <button
                           type="button"
-                          onClick={() => startEditChapter(ch)}
-                          className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-[#7A4B0C] dark:text-[#9E94C0] dark:hover:bg-[#292447] dark:hover:text-[#D5B263]"
-                          title="Chỉnh sửa tên & link chương"
-                          aria-label="Chỉnh sửa chương"
+                          onClick={() => onPlayChapter(effectiveStory, idx)}
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
                         >
-                          <Edit3 className="h-3.5 w-3.5" />
+                          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EFE0BA] text-[#3B2E17] dark:bg-[#292447] dark:text-[#E5DEF9]">
+                            {isActiveChapter && isPlaying ? (
+                              <Pause className="h-3.5 w-3.5 fill-current text-[#7A4B0C] dark:text-[#D5B263]" />
+                            ) : (
+                              <Play className="h-3.5 w-3.5 fill-current" />
+                            )}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`truncate text-sm font-medium ${
+                                isActiveChapter
+                                  ? 'text-[#7A4B0C] dark:text-[#D5B263]'
+                                  : 'text-[#2B2111] dark:text-[#F1ECF8]'
+                              }`}
+                            >
+                              {ch.title}
+                            </p>
+                            {ch.durationSec > 0 && (
+                              <p className="font-mono-tabular text-xs text-[#6D5937] dark:text-[#9E94C0]">
+                                {formatDuration(ch.durationSec)}
+                              </p>
+                            )}
+                          </div>
                         </button>
-                        {story.chapters.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveChapter(ch.id)}
-                            className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#292447]"
-                            title="Xoá chương"
-                            aria-label="Xoá chương"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+
+                        {canManage && (
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => startEditChapter(ch)}
+                              className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-[#7A4B0C] dark:text-[#9E94C0] dark:hover:bg-[#292447] dark:hover:text-[#D5B263]"
+                              title="Chỉnh sửa tên & link chương"
+                              aria-label="Chỉnh sửa chương"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                            {effectiveChapters.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveChapter(ch.id)}
+                                className="rounded p-1.5 text-[#856F4B] hover:bg-[#EFE0BA] hover:text-rose-600 dark:text-[#9E94C0] dark:hover:bg-[#292447]"
+                                title="Xoá chương"
+                                aria-label="Xoá chương"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -828,7 +1156,9 @@ export function StoryDetailModal({
             )
           ) : (
             <span className="text-xs text-[#6D5937] dark:text-[#9E94C0]">
-              Bấm vào tên chương bất kỳ để bắt đầu nghe
+              {hasAccess
+                ? 'Bấm vào tên chương bất kỳ để bắt đầu nghe'
+                : 'Nhập mật khẩu để mở khoá truyện'}
             </span>
           )}
 
